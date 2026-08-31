@@ -1,0 +1,89 @@
+/* ============================================================================
+   tokens.css — the design decisions, in one place.
+   ----------------------------------------------------------------------------
+   Direction: "bench instrument". Warm graphite chassis, silkscreen labels,
+   chart-recorder paper. Colour is treated as signal, not decoration:
+
+     - nominal state has NO colour. It is warm grey on warm graphite.
+     - amber        = an agent is working, or something needs attention
+     - red          = fault, or a measurement over its limit
+     - inferno ramp = temperature, and only temperature
+     - saturated green appears in exactly one place on this page: the all-green
+       camera failure mode. It is the only pure hue here, so when the sensor
+       fails it is unmistakable.
+
+   Nominal operation being colourless is the load-bearing part. A console where
+   everything glows teaches an operator to ignore it, and then the one panel
+   that needed attention is indistinguishable from the twelve that did not.
+   ========================================================================== */
+
+:root {
+  /* ---- chassis ------------------------------------------------------- */
+  --c-void:        #0c0b0a;  /* behind everything, the gap between panels   */
+  --c-chassis:     #131211;  /* page ground                                 */
+  --c-panel:       #1a1917;  /* instrument face                             */
+  --c-panel-hi:    #201e1c;  /* raised / hovered face                       */
+  --c-recess:      #0f0e0d;  /* inset wells: camera viewport, chart paper   */
+  --c-rule:        #2a2724;  /* hairline seams between panels               */
+  --c-rule-soft:   #211f1d;
+  --c-etch:        #35312d;  /* engraved dividers inside a panel            */
+
+  /* ---- ink ----------------------------------------------------------- */
+  --c-ink:         #ece6dd;  /* primary readout                             */
+  --c-ink-2:       #a89f93;  /* secondary values                            */
+  --c-ink-3:       #6e675e;  /* silkscreen labels                           */
+  --c-ink-4:       #494340;  /* disabled / absent data                      */
+
+  /* ---- signal -------------------------------------------------------- */
+  --c-amber:       #ffb000;  /* amber phosphor. agent attention.            */
+  --c-amber-dim:   #8a5f04;
+  --c-amber-wash:  rgba(255, 176, 0, 0.09);
+  --c-red:         #ff4b3e;  /* fault / over limit                          */
+  --c-red-dim:     #8c2b23;
+  --c-red-wash:    rgba(255, 75, 62, 0.10);
+  --c-cyan:        #58c8d8;  /* link + heartbeat. the one cool accent.      */
+  --c-cyan-dim:    #2b6b76;
+  --c-fail-green:  #00e83a;  /* framebuffer failure. used ONLY by the frame. */
+
+  /* ---- inferno ramp, for die temperature ----------------------------- */
+  --t-00: #180d2e;
+  --t-20: #4d1069;
+  --t-40: #8c2369;
+  --t-60: #c43c4e;
+  --t-75: #ea6b26;
+  --t-90: #f9a72b;
+  --t-100:#fbe08a;
+
+  /* ---- type ---------------------------------------------------------- */
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --f-cond: "IBM Plex Sans Condensed", "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+
+  --fs-micro:  10px;   /* silkscreen labels                                 */
+  --fs-small:  11px;
+  --fs-body:   12px;
+  --fs-read:   13px;
+  --fs-num:    22px;   /* vitals readout                                    */
+  --fs-num-lg: 34px;   /* die temperature                                   */
+
+  --ls-label: 0.14em;  /* labels are letterspaced like panel silkscreen     */
+
+  /* ---- metrics ------------------------------------------------------- */
+  --gap:       1px;    /* panels are separated by a seam, not by whitespace */
+  --pad:       14px;
+  --pad-tight: 10px;
+  --radius:    2px;    /* machined, not rounded                             */
+
+  --dur-fast:  110ms;
+  --dur:       220ms;
+  --ease:      cubic-bezier(0.2, 0, 0.1, 1);
+}
+
+/* Dark on purpose, and there is no light theme. This page is read beside a
+   camera frame and a thermal trace, both of which need a dark ground to be
+   legible; a light version would be a different instrument rather than the
+   same one in another skin. Declared so form controls match. */
+:root { color-scheme: dark; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur: 0ms; }
+}

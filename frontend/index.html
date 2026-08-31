@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenHardware</title>
+<meta name="description" content="An operations console for hardware: what a board is doing, measured rather than assumed.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;600&display=swap">
+
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/panels.css">
+</head>
+<body data-camera="off">
+
+<a class="skip" href="#workspace">Skip to the instrument</a>
+
+<div class="console">
+
+  <!-- ==================================================================
+       RAIL — what is being looked at, and whether it is talking
+       ================================================================== -->
+  <header class="rail" id="rail">
+    <div class="rail__mark">
+      <span class="rail__logo">OPENHARDWARE</span>
+      <span class="rail__tag">hardware, measured</span>
+    </div>
+
+    <dl class="rail__facts">
+      <div class="fact">
+        <dt>Device</dt>
+        <dd data-rail="id">––</dd>
+      </div>
+      <div class="fact">
+        <dt>Board</dt>
+        <dd data-rail="board">––</dd>
+      </div>
+      <div class="fact">
+        <dt>Network</dt>
+        <dd data-rail="net">––</dd>
+      </div>
+      <div class="fact">
+        <dt>Firmware</dt>
+        <dd><span data-rail="fw">––</span> <span class="dim" data-rail="sha">––</span></dd>
+      </div>
+      <div class="fact">
+        <dt>Slot</dt>
+        <dd data-rail="slot">––</dd>
+      </div>
+      <div class="fact">
+        <dt>Uptime</dt>
+        <dd data-rail="uptime">––</dd>
+      </div>
+    </dl>
+
+    <div class="link" data-rail="link" data-state="offline">
+      <i class="lamp" aria-hidden="true"></i>
+      <span class="link__text" data-rail="link-text">OFFLINE</span>
+      <span class="bars" data-rail="bars" data-bars="0" role="img" aria-label="Wi-Fi signal unavailable">
+        <i></i><i></i><i></i><i></i>
+      </span>
+    </div>
+
+    <div class="source">
+      <span class="badge" data-ui="source" data-live="false">NO SOURCE</span>
+      <span class="source__note" data-ui="label"></span>
+    </div>
+
+    <p class="sr-only" data-ui="live" role="status" aria-live="polite"></p>
+  </header>
+
+  <!-- ==================================================================
+       RECORDER — the loudest thing on the page, and the only thing
+       allowed to be
+       ================================================================== -->
+  <section class="recorder" aria-labelledby="rec-h">
+    <h2 class="sr-only" id="rec-h">Telemetry chart recorder</h2>
+    <div class="recorder__paper">
+      <canvas data-ui="strip" role="img"
+              aria-label="Rolling chart of die temperature, free PSRAM and frame rate over the last two minutes"></canvas>
+    </div>
+  </section>
+
+  <!-- ==================================================================
+       WORKSPACE
+       ================================================================== -->
+  <main class="grid" id="workspace">
+
+    <!-- ---- camera ------------------------------------------------- -->
+    <section class="panel panel--camera" id="camera" aria-labelledby="camera-h">
+      <header class="panel__head">
+        <h2 class="panel__title" id="camera-h">Camera</h2>
+        <span class="panel__sub" data-cam="sensor">––</span>
+        <span class="panel__spacer"></span>
+        <span class="meta" data-cam="res">––</span>
+        <span class="meta" data-cam="quality">––</span>
+        <span class="meta" data-cam="seq">––</span>
+      </header>
+
+      <div class="cam" data-cam="well" data-link="offline">
+        <canvas data-cam="canvas" role="img"
+                aria-label="Most recent frame captured by the board"></canvas>
+        <div class="cam__ticks" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="cam__stamp">
+          <span data-cam="stamp">––</span>
+          <span data-cam="bytes">––</span>
+        </div>
+        <div class="cam__dead" aria-hidden="true"><span>NO SIGNAL</span></div>
+      </div>
+
+      <footer class="cam__verdict">
+        <span class="tag" data-cam="chip" data-tone="muted">WAITING</span>
+        <p data-cam="verdict">No capture yet this boot.</p>
+      </footer>
+    </section>
+
+    <!-- ---- vitals + attached hardware ----------------------------- -->
+    <section class="panel panel--vitals" id="vitals" aria-labelledby="vitals-h">
+      <header class="panel__head">
+        <h2 class="panel__title" id="vitals-h">Vitals</h2>
+        <span class="panel__sub" data-vitals="rate">––</span>
+      </header>
+
+      <div class="vitals" data-vitals="grid"></div>
+
+      <div class="panel__divide">
+        <span>Attached</span>
+        <em>discovered, never assumed</em>
+      </div>
+
+      <div class="periph-scroll">
+        <div class="offer" data-periph="prompt" hidden></div>
+        <ul class="periphs" data-periph="list"></ul>
+        <p class="empty" data-periph="empty">Waiting for the board to report what is attached.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

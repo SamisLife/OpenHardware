@@ -1,0 +1,322 @@
+/* ============================================================================
+   layout.css — the chassis.
+   ----------------------------------------------------------------------------
+   Panels are separated by a one-pixel seam of the page ground rather than by
+   whitespace, the way instrument faces meet in a rack. That is what lets the
+   layout be this dense without reading as cramped: no wasted margin anywhere,
+   but every region unmistakably bounded.
+
+   Two layouts, and they are genuinely different objects:
+     under 1100px  a document that scrolls
+     over  1100px  a fixed console that fills the viewport, with panels
+                   scrolling inside themselves rather than the page scrolling
+   ========================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--c-void);
+  color: var(--c-ink);
+  font-family: var(--f-cond);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, p, dl, dd, dt, ul, ol, figure { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+
+/* Readings are compared against each other and against themselves a second
+   ago, so they must not reflow between samples. Every readout is tabular. */
+.mono, code, td, th, .meta, .vital__value, .fact dd {
+  font-family: var(--f-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+::selection { background: var(--c-amber); color: #140f02; }
+
+:focus-visible {
+  outline: 2px solid var(--c-amber);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+.skip {
+  position: absolute; left: 8px; top: -60px; z-index: 50;
+  background: var(--c-amber); color: #140f02;
+  padding: 8px 14px; font-weight: 600; text-decoration: none;
+  transition: top var(--dur-fast) var(--ease);
+}
+.skip:focus { top: 8px; }
+
+/* ------------------------------------------------------------------------ */
+/* console shell                                                             */
+/* ------------------------------------------------------------------------ */
+
+.console {
+  display: grid;
+  /* Explicit minmax(0, ...) on both axes. An implicit `auto` track takes its
+     minimum from the widest descendant, and one wide element inside would
+     otherwise stretch the whole page past the viewport. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: var(--gap);
+  background: var(--c-void);
+  min-height: 100vh;
+}
+
+/* ------------------------------------------------------------------------ */
+/* rail                                                                      */
+/* ------------------------------------------------------------------------ */
+
+.rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 22px;
+  padding: 10px var(--pad);
+  background: var(--c-panel);
+  border-bottom: 1px solid var(--c-rule);
+}
+
+.rail__mark {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-right: 20px;
+  border-right: 1px solid var(--c-etch);
+  margin-right: -6px;
+}
+
+.rail__logo {
+  font-family: var(--f-mono);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.18em;
+  color: var(--c-ink);
+}
+
+.rail__tag {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-4);
+}
+
+/* Between about 1100 and 1500 the rail is one line short of fitting, and the
+   strapline is the only thing on it carrying no information. */
+@media (min-width: 1100px) and (max-width: 1499px) {
+  .rail__tag { display: none; }
+}
+
+.rail__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fact { min-width: 0; }
+
+.fact dt {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+}
+
+.fact dd {
+  font-size: var(--fs-small);
+  color: var(--c-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fact dd .dim { color: var(--c-ink-3); }
+
+/* ---- link lamp --------------------------------------------------------- */
+
+.link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--c-rule);
+  background: var(--c-recess);
+  border-radius: var(--radius);
+}
+
+.lamp {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c-ink-4);
+  flex: none;
+}
+
+.link__text {
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-2);
+}
+
+/* The lamp is the only always-on motion in the chrome. It breathes while
+   linked, blinks amber through a reboot, and goes hard red once the board has
+   been silent past its heartbeat window. */
+.link[data-state="linked"] .lamp {
+  background: var(--c-cyan);
+  box-shadow: 0 0 8px rgba(88, 200, 216, 0.8);
+  animation: breathe 2.6s var(--ease) infinite;
+}
+.link[data-state="linked"] .link__text { color: var(--c-ink); }
+
+.link[data-state="rebooting"] {
+  border-color: var(--c-amber-dim);
+  background: var(--c-amber-wash);
+}
+.link[data-state="rebooting"] .lamp {
+  background: var(--c-amber);
+  box-shadow: 0 0 9px rgba(255, 176, 0, 0.9);
+  animation: blink 640ms steps(1, end) infinite;
+}
+.link[data-state="rebooting"] .link__text { color: var(--c-amber); }
+
+.link[data-state="lost"] { border-color: var(--c-red-dim); background: var(--c-red-wash); }
+.link[data-state="lost"] .lamp { background: var(--c-red); box-shadow: 0 0 9px rgba(255, 75, 62, 0.85); }
+.link[data-state="lost"] .link__text { color: var(--c-red); }
+
+@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@keyframes blink   { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0.12; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp { animation: none !important; }
+}
+
+/* ---- signal bars ------------------------------------------------------- */
+
+.bars { display: flex; align-items: flex-end; gap: 2px; height: 11px; }
+.bars i { width: 3px; background: var(--c-ink-4); display: block; }
+.bars i:nth-child(1) { height: 3px; }
+.bars i:nth-child(2) { height: 5px; }
+.bars i:nth-child(3) { height: 8px; }
+.bars i:nth-child(4) { height: 11px; }
+
+.bars[data-bars="1"] i:nth-child(-n+1),
+.bars[data-bars="2"] i:nth-child(-n+2),
+.bars[data-bars="3"] i:nth-child(-n+3),
+.bars[data-bars="4"] i:nth-child(-n+4) { background: var(--c-ink-2); }
+
+/* ---- provenance --------------------------------------------------------
+   Which source is driving the page, stated rather than left to be inferred.
+   Amber until something real is on the other end. */
+
+.source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.badge {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  padding: 3px 7px;
+  border: 1px solid var(--c-amber-dim);
+  color: var(--c-amber);
+  background: var(--c-amber-wash);
+  border-radius: var(--radius);
+}
+.badge[data-live="true"] {
+  border-color: var(--c-cyan-dim);
+  color: var(--c-cyan);
+  background: rgba(88, 200, 216, 0.08);
+}
+
+.source__note {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------------------ */
+/* recorder                                                                  */
+/* ------------------------------------------------------------------------ */
+
+.recorder {
+  background: var(--c-panel);
+  border-bottom: 1px solid var(--c-rule);
+  padding: 0;
+}
+
+.recorder__paper {
+  position: relative;
+  height: clamp(168px, 20vh, 236px);
+  background: var(--c-recess);
+}
+
+.recorder__paper canvas { display: block; width: 100%; height: 100%; }
+
+/* ------------------------------------------------------------------------ */
+/* workspace grid                                                            */
+/* ------------------------------------------------------------------------ */
+
+.grid {
+  display: grid;
+  gap: var(--gap);
+  background: var(--c-void);
+  /* minmax(0, 1fr), not 1fr: the default `auto` minimum is min-content, and a
+     wide descendant would otherwise size the column past the viewport and
+     reflow every paragraph on the page to match. */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.panel {
+  background: var(--c-panel);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ---- ≥1100px: a fixed instrument -------------------------------------- */
+
+@media (min-width: 1100px) {
+  .console { height: 100vh; overflow: hidden; }
+
+  .grid {
+    min-height: 0;
+    grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "camera vitals";
+  }
+
+  /* No camera, no camera panel. Vitals — which carries the attached-hardware
+     list — takes the whole width rather than leaving a hole where an
+     assumption used to be. */
+  body[data-camera="off"] .grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "vitals";
+  }
+
+  .panel--camera { grid-area: camera; }
+  body[data-camera="off"] .panel--camera { display: none; }
+  .panel--vitals { grid-area: vitals; }
+
+  .panel { overflow: hidden; }
+}
