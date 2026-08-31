@@ -12,14 +12,16 @@
        fetchManifest()             what firmware is published
        fetchImages(manifest)       the images, verified against their hashes
        flash(port, images, opts)   write them
-       waitForBoard(port, opts)    the board, after it resets
+       waitForBoard(port, opts)    the board, after a write reset it
        simulated                   whether anything real is behind it
    ========================================================================== */
 
 import {
   BoardPort, portsLike, serialBlockedReason, serialSupported,
 } from './serial.js';
-import { fetchManifest, fetchImages, flashBoard, waitForBoard } from './flash.js';
+import {
+  fetchManifest, fetchImages, flashBoard, reopenAfterReset,
+} from './flash.js';
 
 export const webSerialDriver = {
   simulated: false,
@@ -41,7 +43,11 @@ export const webSerialDriver = {
   fetchManifest,
   fetchImages,
   flash: (port, images, opts) => flashBoard(port, images, opts),
-  waitForBoard: (port, opts) => waitForBoard(port, { ...opts, portsLike }),
+  /* The post-write path, which probes by opening. flash.js has a second
+     function that finds a board without touching it; that one is for a board
+     already running, and using it here is what left the chip sitting in its
+     downloader after every write. */
+  waitForBoard: (port, opts) => reopenAfterReset(port, { ...opts, portsLike }),
 };
 
 /**
@@ -88,7 +94,7 @@ export function simulatedDriver(scene = '') {
     async fetchManifest() {
       await sleep(180);
       return {
-        name: 'Simulated firmware',
+        project: 'Simulated firmware',
         version: '0.8.0-sim',
         chip: 'esp32s3',
         total_bytes: 1064 * 1024,

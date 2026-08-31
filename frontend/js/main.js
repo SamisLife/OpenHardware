@@ -66,8 +66,13 @@ async function setCamera(on) {
 mountOnboard($('#onboard'), {
   onConnect: () => connect(),
   onFlash: () => session?.flash({ eraseAll: eraseChecked() }),
+  onListen: () => session?.listen(),
+  onContinue: () => session?.continueWithBoard(),
   onRetry: () => retry(),
-  isWriting: () => session?.state.rungs.flash.state === 'active',
+  /* The flag, not the rung. The flash rung is also active while it is reading
+     what the board already has, and warning about that trains somebody to
+     dismiss the warning that matters. */
+  isWriting: () => !!session?.state.writing,
 });
 
 /* The recorder reads the telemetry slice through a function rather than

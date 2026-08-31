@@ -142,6 +142,55 @@ export const FAULTS = {
         + 'first — during bring-up it is usually already the answer.',
   },
 
+  /**
+   * Written, reset, came back — and said nothing at all.
+   *
+   * Separate from no_hello because the circumstances are different and so is
+   * the first thing to try. Nothing arriving from a board that was just
+   * written to and reset is most often a board that came back in its download
+   * mode rather than running the image, and a board in download mode is
+   * silent by design: it answers a protocol and volunteers nothing.
+   */
+  silent_after_write: {
+    observed: 'The image was written and the board reset, and nothing has '
+            + 'arrived since — not the new firmware, and not the boot messages '
+            + 'that come before it.',
+    causes: [
+      'the board came back in its download mode instead of running the image, '
+      + 'which is silent by design',
+      'the image was written but does not start',
+    ],
+    next: 'Unplug the board and plug it back in, then connect again. A power '
+        + 'cycle leaves download mode, and it is the difference between a '
+        + 'board that will not run and one that was never asked to. If it is '
+        + 'still silent, close this page and run tools/monitor.py — a serial '
+        + 'port is exclusive, so that reads the board with nothing else in the '
+        + 'way, and it settles whether the board is quiet or this page is deaf.',
+  },
+
+  /**
+   * The distinction this fault exists to draw is the one the project is about.
+   *
+   * Every other reading here is about the board. This one is not: the page
+   * never attached a reader, so it has heard nothing and knows nothing, and
+   * the board may be streaming perfectly the whole time. No cause here names
+   * the hardware, because none was observed.
+   */
+  read_failed: {
+    observed: 'The port opened but this page never started reading from it, so '
+            + 'nothing has been heard and nothing can be concluded about the '
+            + 'board.',
+    causes: [
+      'the flashing library still holds the stream, so a second reader cannot '
+      + 'attach to it',
+      'another tab or program has the port — a serial port is exclusive '
+      + 'machine-wide',
+    ],
+    next: 'Reload the page and connect again. To see what the board is doing '
+        + 'meanwhile, close this page and run tools/monitor.py, which reads it '
+        + 'with nothing else in the way.',
+  },
+
   no_beat: {
     observed: 'The board identified itself and then sent no telemetry.',
     causes: [

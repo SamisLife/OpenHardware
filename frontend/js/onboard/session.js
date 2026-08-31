@@ -9,10 +9,20 @@
        IDENTIFY    something on the other end that answers
        TELEMETRY   and keeps answering
 
-   FLASH and BOOT are skipped for a board already running something that speaks
-   the protocol, which is the ordinary case once a board has been set up once.
-   Writing over a working board costs it whatever it was holding, so it is
-   never what happens by default.
+   FLASH always stops and asks, and it asks having already looked. It listens
+   first, so the question it puts is a specific one: this board is running
+   something recognisable, or it is not, and either way writing is a choice
+   somebody makes rather than something that happens on the way past.
+
+   That placement is the point. Listening for an identity is how the decision
+   about writing gets made, not a step after it — so running past FLASH and
+   failing on IDENTIFY would report the problem two rungs from the thing that
+   fixes it, and would report a decision nobody was asked to make as a
+   malfunction. A board running unrecognised firmware is not broken.
+
+   Stopping even when the firmware IS recognised costs one click and buys the
+   thing that matters more: writing a fresh image is always one step away,
+   from the same place, without having to reach a failure first.
 
    If bring-up stops, it stops on a named rung with a named observation. That
    is the whole design: "setup failed" is not something anybody can act on, but
@@ -47,6 +57,8 @@ const RUNG_TITLE = {
 const HELLO_MS = 4000;
 /** And for the first telemetry after it has. */
 const BEAT_MS = 6000;
+/** How long "listen anyway" waits. Long, because reading the wire is the point. */
+const LISTEN_MS = 60000;
 /** Lines kept in the monitor. A board in a boot loop can produce thousands. */
 const MONITOR_MAX = 600;
 
@@ -70,7 +82,14 @@ export class Session {
 
   reset() {
     this.state = {
-      /** idle | working | fault | done */
+      /**
+       * idle | working | decide | fault | done
+       *
+       * `decide` is not a failure. The flow is waiting on a person, and the
+       * distinction matters: a fault means something went wrong, and putting a
+       * board running perfectly good third-party firmware under that heading
+       * is a false report.
+       */
       phase: 'idle',
       active: null,
       rungs: Object.fromEntries(RUNGS.map(r => [r, {
@@ -85,6 +104,28 @@ export class Session {
       hello: null,
       /** What was heard on the wire before anything identified itself. */
       heard: { lines: 0, first: null },
+      /**
+       * How the running firmware compares to what is published, once both are
+       * known. Null while unknown, and null is the ordinary state — there may
+       * be no published image to compare against at all.
+       */
+      published: null,
+      /**
+       * What the flash rung found. { known, fw } for a board that identified
+       * itself, { known: false, lines } for one that did not — the line count
+       * being the only honest thing that can be said about firmware nobody
+       * has a name for.
+       */
+      found: null,
+      /**
+       * True only while bytes are going to the chip.
+       *
+       * Distinct from the flash rung being active, which now also covers
+       * reading what is already on the board. Warning somebody about closing
+       * the tab during a read-only check trains them to dismiss the warning
+       * that matters.
+       */
+      writing: false,
       fault: null,
       simulated: !!this.driver?.simulated,
       blocked: this.driver?.blockedReason?.() ?? null,
@@ -158,7 +199,21 @@ export class Session {
   async connect({ reuse = false } = {}) {
     if (this.state.blocked) return this.fail('connect', 'blocked', this.state.blocked);
 
+    /* Everything the previous attempt concluded, cleared.
+     *
+     * This is the failure this whole project exists to prevent, in its own
+     * code: a finding from one attempt rendering as though it described the
+     * current one. It showed up as a screen reporting that nothing
+     * identifiable had arrived while, directly underneath, stating which
+     * version the board was running — two statements about two different
+     * moments, presented as one situation. */
     this.state.fault = null;
+    this.state.published = null;
+    this.state.found = null;
+    this.state.writing = false;
+    this.state.hello = null;
+    this._justWritten = false;
+
     this.state.phase = 'working';
     this.rung('connect', 'active', 'waiting for a port to be chosen');
 
@@ -203,11 +258,134 @@ export class Session {
     }
 
     this.rung('connect', 'done', 'port open');
+    return this.decideFirmware();
+  }
 
-    /* A board already speaking the protocol needs nothing written to it. */
-    this.rung('flash', 'skipped', 'not written');
+  /* ---- 2. FLASH, which begins by deciding ------------------------------ */
+
+  /**
+   * What is on this board, and does anything need writing?
+   *
+   * Always ends by asking. Two shapes of the same question, decided by whether
+   * anything identified itself, and the flow waits on the answer either way.
+   *
+   * What is deliberately NOT done here is characterising unrecognised
+   * firmware. An earlier version named the framing it saw, which was accurate
+   * for exactly one board and misleading everywhere else: firmware this page
+   * does not recognise is usually not another version of this project, it is
+   * arbitrary, and inventing a category for it claims knowledge that does not
+   * exist. What can honestly be said is how much the board said and that none
+   * of it was recognised.
+   */
+  async decideFirmware() {
+    this.rung('flash', 'active', 'checking what the board is running');
+    this.state.heard = { lines: 0, first: null };
+
+    /* Asked as well as waited for: a board that has been running a while
+       announces itself infrequently, and there is no reason to sit through
+       that when it answers a request immediately. */
+    this.link?.send({ t: 'ping' }).catch(() => {});
+    const hello = await this.awaitHello(HELLO_MS);
+
+    /* Awaited here, unlike after identification, because the answer changes
+       what the question says — a version to write, and whether it differs from
+       what is already there. */
+    await this.loadPublished(hello);
+
+    this._pending = hello;
+    const version = this.state.published?.version;
+
+    if (hello) {
+      this.state.found = { known: true, fw: hello.fw || null };
+      this.rung('flash', 'ask',
+        this.state.published?.action === 'differs' && version
+          ? `running ${hello.fw || 'firmware'} · ${version} published`
+          : `already running ${hello.fw || 'this protocol'}`);
+    } else {
+      this.state.found = { known: false, lines: this.state.heard.lines };
+      this.rung('flash', 'ask',
+        this.state.heard.lines
+          ? `${this.state.heard.lines} lines of output, none recognised`
+          : 'no output at all');
+    }
+
+    this.state.phase = 'decide';
+    this.emit();
+    return null;
+  }
+
+  /**
+   * Carry on with whatever is already on the board.
+   *
+   * The identity that answered during the decision is reused rather than asked
+   * for again. A board that has just said what it is has not become a
+   * different board, and probing twice would mean the flow could fail on the
+   * second attempt at a question already answered.
+   */
+  continueWithBoard() {
+    if (!this._pending) return this.listen();
+
+    this.rung('flash', 'skipped', 'kept what was on the board');
     this.rung('boot', 'skipped', '');
-    return this.identify();
+    return this.identified(this._pending);
+  }
+
+  /**
+   * What is published, and how it compares to what is running.
+   *
+   * Compared on the ELF hash rather than the version string: two builds of
+   * different source can carry the same label, so comparing labels compares
+   * two claims where comparing hashes compares the artefacts.
+   *
+   * Every failure is silent. There may be no server and no published image,
+   * which is not a problem with the board in front of somebody.
+   */
+  async loadPublished(hello) {
+    let manifest;
+    try {
+      manifest = await this.driver.fetchManifest();
+    } catch {
+      return;
+    }
+    if (!manifest) return;
+    this.state.manifest = manifest;
+
+    const running = String(hello?.sha || '').toLowerCase();
+    const published = String(manifest.elf_sha8 || '').toLowerCase();
+
+    this.state.published = {
+      version: manifest.version || '',
+      running: hello?.fw || null,
+      action: running && published
+        ? (running === published ? 'same' : 'differs')
+        : 'unknown',
+    };
+  }
+
+  /**
+   * Leave the board alone and keep listening to it.
+   *
+   * A real choice rather than a way of declining one. Watching a board nobody
+   * intends to overwrite is a legitimate thing to want — it is most of what
+   * the monitor is for — and the window is long because the reason to sit here
+   * is to read what the board is saying, not to wait for a verdict.
+   */
+  async listen() {
+    this.rung('flash', 'skipped', 'left as it was');
+    this.rung('boot', 'skipped', '');
+    this.rung('identify', 'active', 'listening — nothing recognised yet');
+    this.state.phase = 'working';
+    this.emit();
+
+    const hello = await this.awaitHello(LISTEN_MS);
+    if (hello) return this.identified(hello);
+
+    /* Now it is a fault, because this time it was asked for and waited out. */
+    this.rung('identify', 'fault', `${this.state.heard.lines} lines, nothing identifiable`);
+    this.state.fault = fault('no_hello');
+    this.state.phase = 'fault';
+    this.emit();
+    return null;
   }
 
   async openLink() {
@@ -218,6 +396,7 @@ export class Session {
         onText: (text, bad) => {
           this.state.heard.lines++;
           if (!this.state.heard.first) this.state.heard.first = String(text).slice(0, 70);
+
           this.log(text, bad ? 'bad' : 'text');
         },
         onClose: () => {
@@ -246,6 +425,8 @@ export class Session {
     if (!this.port) return this.fail('connect', 'no_port');
 
     this.state.fault = null;
+    this.state.found = null;
+    this.state.hello = null;
     this.state.phase = 'working';
 
     /* Everything downstream is about to happen again, so it is put back to
@@ -271,13 +452,14 @@ export class Session {
     }
 
     const kb = (manifest.total_bytes || 0) / 1024;
-    this.log(`${manifest.name || 'firmware'} ${manifest.version || ''} · `
+    this.log(`${manifest.project || 'firmware'} ${manifest.version || ''} · `
            + `${manifest.parts.length} images · ${kb.toFixed(0)} KB · hashes verified`, 'meta');
 
     /* ---- phase two: write. From here the board is in play. ------------- */
     await this.closeLink();
 
     let chipAnswered = false;
+    this.state.writing = true;
     this.rung('flash', 'active', 'connecting to the chip');
     try {
       await this.driver.flash(this.port, images, {
@@ -298,10 +480,12 @@ export class Session {
       this.state.progress = null;
       /* Whether the chip ever answered is the fact that decides the message,
          not a regex over the error text. */
+      this.state.writing = false;
       return this.fail('flash', chipAnswered ? 'flash_failed' : 'no_chip', err.message);
     }
 
     this.state.progress = null;
+    this.state.writing = false;
     this.rung('flash', 'done', `${manifest.version || 'image'} written`);
     return this.waitForBoot();
   }
@@ -327,7 +511,13 @@ export class Session {
     this.rung('boot', 'active', 'back on the bus');
     if (!(await this.openLink())) return this.fail('boot', 'no_open', this._openError);
 
-    this.rung('boot', 'done', 'running');
+    this.rung('boot', 'done', 'back on the bus');
+
+    /* Marked so that silence from here is reported as what it is. A board that
+       has just been written to and reset is in different circumstances from
+       one somebody has only connected to, and the first thing worth trying
+       differs. */
+    this._justWritten = true;
     return this.identify();
   }
 
@@ -350,7 +540,7 @@ export class Session {
     if (!hello) {
       /* Three outcomes, not two. A board chattering away in firmware that does
          not speak this protocol is not the same as a silent one, and reporting
-         "nothing there" over a running project is both wrong and alarming. */
+         "nothing there" over a running board is both wrong and alarming. */
       if (this.state.heard.lines > 0) {
         this.rung('identify', 'fault',
           `${this.state.heard.lines} lines of output, none of them protocol frames`);
@@ -362,15 +552,45 @@ export class Session {
         this.emit();
         return null;
       }
-      return this.fail('identify', 'no_hello');
+      /* Before blaming the board: did this page ever manage to read at all?
+         A reader that never attached — a stream still locked by the flashing
+         library, or a port with no readable at all — produces exactly the
+         same silence as a board that is not running, and the two have nothing
+         in common. Saying "nothing arrived" about a link that was never
+         listening is the one kind of statement this whole project exists to
+         refuse. */
+      if (this.link?.readerFailed) {
+        return this.fail('identify', 'read_failed', this.link.readerFailed);
+      }
+
+      return this.fail('identify', this._justWritten ? 'silent_after_write' : 'no_hello');
     }
 
+    return this.identified(hello);
+  }
+
+  /**
+   * A board has said what it is. Shared by both routes to that point.
+   *
+   * Reached either from the flash decision, when the board already spoke the
+   * protocol, or from IDENTIFY after an image has been written. The second
+   * route probes again because the board it is talking to is a different one
+   * from the board it decided about.
+   */
+  identified(hello) {
     this.state.hello = hello;
+    this.state.phase = 'working';
     this.rung('identify', 'done',
       [hello.board_name || hello.board, hello.mac, hello.fw].filter(Boolean).join(' · '));
 
+    /* Deliberately not awaited. The board has identified itself and telemetry
+       is the next thing that matters; whether a newer image exists somewhere
+       is worth knowing and worth nobody waiting on. */
+    this.loadPublished(hello).then(() => this.emit());
+
     return this.watchTelemetry();
   }
+
 
   awaitHello(timeoutMs) {
     return new Promise(resolve => {

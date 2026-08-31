@@ -163,6 +163,27 @@ body[data-view="onboard"] .console {
 }
 .notice__alt a { color: var(--c-ink-2); }
 
+/* A confirmation, not a warning. It says the boring outcome — the board is
+   running what was published — and the boring outcome should not draw the eye
+   away from anything that is not. */
+.notice--quiet { color: var(--c-ink-3); }
+
+/* ---- the firmware decision ---------------------------------------------
+   Reads as a finding and a question, not as an error. The board is fine. */
+.decide__found {
+  font-size: var(--fs-read);
+  line-height: 1.6;
+  color: var(--c-ink);
+}
+.decide__found strong { color: var(--c-amber); font-weight: 600; }
+
+.decide__ask {
+  margin-top: 8px;
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--c-ink-2);
+}
+
 /* ------------------------------------------------------------------------ */
 /* the ladder                                                                */
 /* ------------------------------------------------------------------------ */
@@ -233,6 +254,19 @@ body[data-view="onboard"] .console {
 .rung[data-state="fault"] .rung__dot {
   background: var(--c-red);
   border-color: var(--c-red);
+}
+
+/* Waiting on a person, not on the hardware.
+   Deliberately not the fault colour: nothing has gone wrong, and a board
+   running other firmware is a board that works. Deliberately not the active
+   pulse either — a pulse says "in progress", and this is stopped until
+   somebody answers. */
+.rung[data-state="ask"] .rung__title { color: var(--c-amber); }
+.rung[data-state="ask"] .rung__detail { color: var(--c-ink-2); }
+.rung[data-state="ask"] .rung__dot {
+  background: transparent;
+  border-color: var(--c-amber);
+  box-shadow: 0 0 0 3px var(--c-amber-wash);
 }
 
 @keyframes rung-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }

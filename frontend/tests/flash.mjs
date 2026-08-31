@@ -43,7 +43,7 @@ const goodPart = (over = {}) => ({
   path: 'firmware.bin', offset: 0x20000, size: 16, sha256: hex64('a'), ...over,
 });
 const manifest = (over = {}) => ({
-  name: 'test', version: '1.0.0', chip: 'esp32s3',
+  project: 'test', version: '1.0.0', chip: 'esp32s3',
   parts: [goodPart()], ...over,
 });
 
@@ -138,10 +138,10 @@ const manifest = (over = {}) => ({
 /* ------------------------------------------------------------------------ */
 
 {
-  /* Opening a port asserts DTR and RTS, which on hardware with native USB are
-     wired to reset and boot select. Probing by opening therefore resets the
-     board it is waiting for, repeatedly. Presence is established by matching
-     identifiers instead, and nothing is opened here at all. */
+  /* waitForBoard is for a board that is already RUNNING. Opening a port
+     asserts DTR and RTS, which on hardware with native USB are wired to reset
+     and boot select, so probing by opening would reset the running board it
+     was reattaching to and take its uptime and boot identity with it. */
   let opened = 0;
   const port = { open: async () => { opened++; }, close: async () => {} };
 
@@ -154,9 +154,70 @@ const manifest = (over = {}) => ({
     serial: null,
   });
 
-  ok('the board is found once it is back on the bus', found === port);
+  ok('a running board is found once it is back on the bus', found === port);
   ok('and nothing was opened to find out', opened === 0,
-     `${opened} ports were opened — probing by opening resets the board`);
+     `${opened} ports were opened — probing by opening resets a running board`);
+}
+
+/* ------------------------------------------------------------------------ */
+/* and the opposite rule, for the opposite moment                            */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* reopenAfterReset is for the moment AFTER a write, and it has to do the
+     thing the function above must not: drive DTR and RTS through a complete
+     open-and-close cycle. That cycle is what leaves the chip running the
+     application instead of waiting in its ROM downloader, which is silent by
+     design and looks exactly like a board that will not start. */
+  const seen = [];
+  const port = {
+    open: async () => { seen.push('open'); },
+    close: async () => { seen.push('close'); },
+  };
+
+  const found = await F.reopenAfterReset(port, {
+    timeoutMs: 3000, pollMs: 50, portsLike: async () => [port],
+  });
+
+  ok('the board comes back after a write', found === port);
+  ok('and the port was opened, not merely matched', seen.includes('open'),
+     'a board left in download mode emits nothing at all');
+  ok('and released again, so the reader can have it',
+     seen.join(',') === 'open,close', seen.join(','));
+}
+
+{
+  /* The handle held may be stale: a reset takes the whole USB device off the
+     bus and it can return as a different port object. */
+  let live = false;
+  setTimeout(() => { live = true; }, 150);
+
+  const stale = { open: async () => { throw new Error('device gone'); }, close: async () => {} };
+  let replacementOpened = 0;
+  const replacement = {
+    open: async () => {
+      if (!live) throw new Error('not yet');
+      replacementOpened++;
+    },
+    close: async () => {},
+  };
+
+  const found = await F.reopenAfterReset(stale, {
+    timeoutMs: 3000, pollMs: 50, portsLike: async () => [stale, replacement],
+  });
+
+  ok('a board that re-enumerated is found as its new handle', found === replacement);
+  ok('and it was cycled too', replacementOpened === 1, replacementOpened);
+}
+
+{
+  const dead = { open: async () => { throw new Error('nothing there'); }, close: async () => {} };
+  const t0 = Date.now();
+  const found = await F.reopenAfterReset(dead, {
+    timeoutMs: 400, pollMs: 80, portsLike: async () => [],
+  });
+  ok('a board that never comes back times out rather than hanging', found === null);
+  ok('and does so within its deadline', Date.now() - t0 < 1500);
 }
 
 {
@@ -247,8 +308,12 @@ const manifest = (over = {}) => ({
   });
 
   await s.connect();
+  /* Connecting stops to ask and writes nothing. Asserted on the flag rather
+     than on the rung, because the rung is also 'active' while it reads what is
+     already on the board — and the invariant worth protecting is that no bytes
+     reach the chip, not which label the rung is wearing. */
   ok('connecting alone does not write anything',
-     s.state.rungs.flash.state === 'skipped',
+     s.state.writing === false && s.state.rungs.flash.state === 'ask',
      'writing over a working board is never what happens on the way past');
 
   await s.flash();
@@ -282,6 +347,46 @@ const manifest = (over = {}) => ({
   ok('a missing image is not described as an interrupted write',
      !/writing was interrupted/i.test(FAULTS.no_manifest.observed),
      FAULTS.no_manifest.observed);
+}
+
+/* ------------------------------------------------------------------------ */
+/* a link that never listened must not report on the board                   */
+/* ------------------------------------------------------------------------ */
+
+{
+  const f = FAULTS.read_failed;
+  ok('read_failed: states what was observed', !!f?.observed && f.observed.length > 10);
+  ok('read_failed: says the page heard nothing, not that the board sent nothing',
+     /never started reading|nothing can be concluded/i.test(f.observed), f.observed);
+
+  /* The whole point of separating this from silent_after_write. A reader that
+     never attached has observed nothing about the hardware, so naming a
+     hardware cause would be inventing one. */
+  const blames = f.causes.filter(c => /board|firmware|image|power|cable/i.test(c));
+  ok('read_failed: names no cause in the hardware, because none was observed',
+     blames.length === 0, blames.join(' | '));
+}
+
+{
+  /* The session has to reach for that fault rather than the one about the
+     board. A link whose reader never attached knows nothing either way. */
+  const s = new Session(simulatedDriver(''), () => {});
+  s._justWritten = true;
+  s.link = {
+    readerFailed: 'the stream is locked by another reader',
+    /* A link whose reader never attached can still be written to, and the
+       flow does try — which is the point: sending succeeds and nothing comes
+       back, because there is nothing listening on this side. */
+    send: async () => true,
+  };
+  s.state.heard = { lines: 0, first: null };
+  await s.identify();
+
+  ok('a failed reader is reported as a failed reader',
+     s.state.fault?.code === 'read_failed', s.state.fault?.code);
+  ok('and not as a board that will not start',
+     s.state.fault?.code !== 'silent_after_write');
+  await s.dispose();
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);

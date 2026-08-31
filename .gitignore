@@ -24,7 +24,18 @@ firmware/harness/sdkconfig.old
 # Vendored dependencies, restored by the component manager from the lockfile.
 firmware/harness/managed_components/
 
+# Published images and their manifest, written by tools/package.sh. Generated
+# from committed source by one command, and rewritten on every build — keeping
+# them would put a few hundred kilobytes of binary into the history for every
+# firmware change, to save a step that is already a script.
+firmware/dist/
+
 # ---- everything else -------------------------------------------------------
+# Bytecode from tools/tests. Written on import, never edited, and specific to
+# whichever Python happened to run it.
+__pycache__/
+*.pyc
+
 node_modules/
 .DS_Store
 Thumbs.db

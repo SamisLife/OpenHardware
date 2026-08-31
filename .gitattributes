@@ -1,0 +1,13 @@
+# ============================================================================
+# This project is developed on Windows, where git's autocrlf turns LF into CRLF
+# in the working tree. For most files that is harmless. For a shell script it
+# is not: `#!/bin/sh` followed by a carriage return makes the kernel look for
+# an interpreter named "sh\r", and the error names a file that plainly exists.
+#
+# The build and packaging scripts are also handed to a Linux container, so they
+# have to be LF wherever they are checked out.
+# ============================================================================
+* text=auto
+
+*.sh text eol=lf
+*.py text eol=lf

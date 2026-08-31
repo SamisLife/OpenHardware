@@ -24,7 +24,17 @@
 
 #include "esp_err.h"
 
-#define HW_FW_VERSION   "0.10.0"
+/**
+ * The firmware version is NOT defined here.
+ *
+ * It lives in version.txt, which the build compiles into the image's app
+ * descriptor, and it is read back out of that descriptor at runtime. One
+ * source, and the loop closes: the string a board reports over the wire and
+ * the string in the published manifest are read from the same bytes, so they
+ * cannot disagree. A constant here would be a second copy, and the first time
+ * it drifted the manifest would confidently describe an image nobody is
+ * running.
+ */
 #define HW_BOARD_ID     "esp32s3_generic"
 #define HW_BOARD_NAME   "ESP32-S3"
 

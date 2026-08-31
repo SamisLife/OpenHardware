@@ -30,6 +30,15 @@ let rendered = 0;
 /** What the action row was last built for. See renderActions. */
 let lastActionSig = null;
 
+/**
+ * Faults where writing firmware is the fix rather than merely a possibility.
+ *
+ * Retrying any of these produces the same result every time, because nothing
+ * about the board changes between attempts — so "Try again" is the wrong thing
+ * to give primary weight to.
+ */
+const WRITE_ANSWERS = new Set(['no_hello', 'no_beat']);
+
 export function mountOnboard(root, opts = {}) {
   handlers = opts;
   el = {
@@ -121,20 +130,86 @@ const LEDE = {
   idle: 'Connect a board over USB, or run a simulated one. Nothing is installed '
       + 'and nothing is written to the board.',
   working: 'Working. The board is narrating itself on the right.',
+  decide: '',
   fault: '',
   done: 'Live.',
 };
 
+/**
+ * What was found on the board, said plainly.
+ *
+ * Not rendered as a fault, and the difference is not cosmetic. A board running
+ * somebody else's firmware is working exactly as it should — it has power, the
+ * cable is good, it boots and reports — and filing that under "Observed /
+ * possible causes" describes a healthy board as a broken one. What is actually
+ * happening is that the flow reached a decision only a person can make.
+ */
+function renderDecision(state) {
+  const f = state.found || {};
+  const pub = state.published;
+
+  let found;
+  let ask;
+
+  if (f.known) {
+    const running = f.fw ? `<strong>${esc(f.fw)}</strong>` : 'firmware this page can read';
+    found = `This board is already running ${running}.`;
+
+    if (pub?.action === 'differs' && pub.version) {
+      found += ` The published image is <strong>${esc(pub.version)}</strong>,
+                and the two are built from different source.`;
+    } else if (pub?.action === 'same') {
+      found += ' It matches the published image.';
+    }
+    ask = 'Carrying on uses what is already there and writes nothing. Writing a '
+        + 'fresh copy replaces it, along with anything the board had stored.';
+  } else if (f.lines) {
+    /* Counted, not characterised. Firmware this page cannot read is usually
+       not another version of this project — it is arbitrary — and naming a
+       category for it would claim knowledge that does not exist. */
+    found = `The board sent <strong>${f.lines} lines</strong> of output and none
+             of them were recognised. It is running something; what, cannot be
+             determined from here.`;
+    ask = 'Whatever it was saying is in the monitor beside this. Writing '
+        + 'replaces it, along with anything the board had stored.';
+  } else {
+    found = 'The port is open and the board has sent nothing at all.';
+    ask = 'It may be sitting in its bootloader rather than running an '
+        + 'application, which is the ordinary state of a board that has never '
+        + 'been written to.';
+  }
+
+  el.lede.innerHTML = `
+    <p class="decide__found">${found}</p>
+    <p class="decide__ask">${ask}</p>`;
+}
+
 function renderHead(state) {
   if (state.phase === 'fault' && state.fault) renderFault(state.fault);
+  else if (state.phase === 'decide') renderDecision(state);
   else el.lede.textContent = LEDE[state.phase] || '';
 
   const blocked = state.blocked;
-  const notice = blocked && !state.simulated
-    ? `<p class="notice notice--block">${esc(blocked)}</p>
+  let notice = '';
+
+  if (blocked && !state.simulated) {
+    notice = `<p class="notice notice--block">${esc(blocked)}</p>
        <p class="notice__alt">A simulated board runs the same flow with no hardware:
-         <a href="?sim">open it with ?sim</a>.</p>`
-    : '';
+         <a href="?sim">open it with ?sim</a>.</p>`;
+  } else if (state.published?.action === 'differs') {
+    /* Stated, not pressed. The board works, so this is information rather than
+       a problem, and writing over it costs whatever it was holding. The
+       control is already in the row below — this only says why somebody might
+       reach for it. */
+    notice = `<p class="notice">This board is running
+       <strong>${esc(state.published.running)}</strong>.
+       The published image is <strong>${esc(state.published.version)}</strong>,
+       and their hashes differ. Keeping what is on the board is fine.</p>`;
+  } else if (state.published?.action === 'same') {
+    notice = `<p class="notice notice--quiet">Running the published image,
+       ${esc(state.published.version)}.</p>`;
+  }
+
   if (el.notice.innerHTML !== notice) el.notice.innerHTML = notice;
 
   renderActions(state, blocked);
@@ -171,6 +246,9 @@ function renderActions(state, blocked) {
   const sig = JSON.stringify([
     state.phase, state.hasPort, state.simulated, !!blocked,
     state.fault ? state.fault.code : null, state.fault ? state.fault.raw : null,
+    state.published ? state.published.action : null,
+    state.published ? state.published.version : null,
+    state.found ? !!state.found.known : null,
   ]);
   if (sig === lastActionSig) return;
   lastActionSig = sig;
@@ -182,8 +260,66 @@ function renderActions(state, blocked) {
     return;
   }
 
+  /* Waiting on a person, not on the hardware. Both options are real and
+     neither is a recovery: writing replaces what is there, and listening
+     anyway is a legitimate choice for somebody who wants to watch a board they
+     have no intention of overwriting. */
+  if (state.phase === 'decide') {
+    const version = state.published?.version;
+    const write = version ? `Write ${version}` : 'Write firmware';
+    const known = !!state.found?.known;
+
+    /* Which one leads depends on what is already there, and it is never the
+       destructive one for a board that works. Writing over a board that is
+       running costs it whatever it was holding, so it is offered rather than
+       suggested — but it is offered every time, from here, so that a fresh
+       image never requires reaching a failure first. */
+    if (known) {
+      add('button', 'Continue with it', {
+        cls: 'btn btn--primary', on: () => handlers.onContinue?.(),
+      });
+      add('button', version ? `Re-flash ${version}` : 'Re-flash', {
+        cls: 'btn', on: () => handlers.onFlash?.(),
+      });
+    } else {
+      add('button', write, { cls: 'btn btn--primary', on: () => handlers.onFlash?.() });
+      add('button', 'Listen anyway', { cls: 'btn', on: () => handlers.onListen?.() });
+    }
+
+    const check = document.createElement('label');
+    check.className = 'check';
+    check.innerHTML = '<input type="checkbox" data-ob="erase"> Erase first'
+      + '<em>slower, and forgets anything the board had stored</em>';
+    el.actions.appendChild(check);
+    return;
+  }
+
   if (state.phase === 'fault') {
-    add('button', 'Try again', { cls: 'btn btn--primary', on: () => handlers.onRetry?.() });
+    /* Writing has to be reachable from here.
+     *
+     * Every fault used to offer exactly one control, "Try again", and for the
+     * faults below that is the wrong and only option: a board running the
+     * wrong firmware will fail identically however many times it is retried,
+     * and there was no way from that screen to the one thing that fixes it.
+     * The way out was to dismiss the fault, reconnect, and find a button that
+     * only appears when nothing is wrong. */
+    const writeFixesIt = WRITE_ANSWERS.has(state.fault?.code);
+
+    add('button', 'Try again', {
+      cls: writeFixesIt ? 'btn' : 'btn btn--primary',
+      on: () => handlers.onRetry?.(),
+    });
+
+    /* Primary only where it is genuinely the answer. Offered but secondary
+       elsewhere, because writing over a board costs it whatever it was
+       holding and that is not a decision to nudge somebody into. */
+    if (state.hasPort) {
+      add('button', 'Write this firmware', {
+        cls: writeFixesIt ? 'btn btn--primary' : 'btn',
+        on: () => handlers.onFlash?.(),
+      });
+    }
+
     if (state.fault?.raw) {
       const pre = document.createElement('code');
       pre.className = 'fault__raw';
@@ -203,12 +339,20 @@ function renderActions(state, blocked) {
      running costs it whatever it was holding, so the label names what it does
      and it does not get the primary weight. */
   if (state.hasPort) {
-    add('button', 'Write firmware', { cls: 'btn', on: () => handlers.onFlash?.() });
-    const label = document.createElement('label');
-    label.className = 'check';
-    label.innerHTML = '<input type="checkbox" data-ob="erase"> Erase first'
+    /* Named once there is a name. "Write firmware" leaves somebody to wonder
+       which firmware; "Write 0.11.0" is the same click with the answer on it. */
+    const label = state.published?.version
+      ? `Write ${state.published.version}`
+      : 'Write firmware';
+    add('button', label, {
+      cls: state.published?.action === 'differs' ? 'btn btn--primary' : 'btn',
+      on: () => handlers.onFlash?.(),
+    });
+    const check = document.createElement('label');
+    check.className = 'check';
+    check.innerHTML = '<input type="checkbox" data-ob="erase"> Erase first'
       + '<em>slower, and forgets anything the board had stored</em>';
-    el.actions.appendChild(label);
+    el.actions.appendChild(check);
   }
 }
 

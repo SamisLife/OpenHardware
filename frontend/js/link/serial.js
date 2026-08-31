@@ -103,6 +103,10 @@ export class BoardPort {
     this.reader = null;
     this.open = false;
     this._pump = null;
+    /** Bytes that actually arrived. The denominator for "nothing came back". */
+    this.bytes = 0;
+    /** Why the read loop never attached, or null. See _read(). */
+    this.readerFailed = null;
     /** Set by stop(), so a close that was asked for is not reported as news. */
     this._stopping = false;
     this._writing = Promise.resolve();
@@ -118,9 +122,13 @@ export class BoardPort {
     try {
       await this.port.open({ baudRate, bufferSize: 4096 });
     } catch (err) {
-      /* Already-open is not an error here: something else in this page may
-         have left it open, and the read loop below will find out. */
+      /* Already-open is not fatal — something else in this page may have left
+         it open — but it is recorded rather than forgotten. A port this page
+         did not open is one whose control lines are in a state this page did
+         not set, and if the read loop then attaches to nothing, that is the
+         first thing worth knowing. */
       if (!/already open/i.test(err.message)) throw err;
+      this.wasAlreadyOpen = true;
     }
 
     /* Chrome does not define what DTR and RTS are on open, and on a board with
@@ -137,20 +145,53 @@ export class BoardPort {
     this._pump = this._read();
   }
 
+  /**
+   * ----------------------------------------------------------------------------
+   * NEVER STARTING AND HEARING NOTHING ARE DIFFERENT FACTS
+   *
+   * These two used to share one catch, and the cost was a specific lie. If
+   * `port.readable` is null, or another reader still holds the stream — which
+   * is exactly the state a flashing library can leave behind — `getReader()`
+   * throws before a single byte is ever asked for. Swallowed, that leaves the
+   * page believing it has a live link, reporting a silent board, and naming
+   * causes that are all about the hardware. The board may be streaming
+   * perfectly into a reader that was never attached.
+   *
+   * So the failure to start is recorded, and `bytes` counts what actually
+   * arrived. "The port was open for four seconds and nothing came" is a
+   * measurement. "The reader never attached" is a defect in this page. A
+   * diagnosis that cannot tell them apart is worse than none.
+   */
   async _read() {
     const decoder = new TextDecoder();
     let closedCleanly = false;
 
     try {
+      if (!this.port.readable) {
+        throw new Error('the port reports no readable stream');
+      }
       this.reader = this.port.readable.getReader();
+    } catch (err) {
+      /* Loud, and on the object, because nothing downstream can observe this
+         and everything downstream will otherwise blame the board. */
+      this.readerFailed = err.message;
+      this.open = false;
+      this.handlers.onReadError?.(err.message);
+      return;
+    }
+
+    try {
       for (;;) {
         const { value, done } = await this.reader.read();
         if (done) { closedCleanly = true; break; }
-        if (value) this._frames.push(decoder.decode(value, { stream: true }));
+        if (value) {
+          this.bytes += value.length;
+          this._frames.push(decoder.decode(value, { stream: true }));
+        }
       }
     } catch {
-      /* A disconnect during a read throws. That is the ordinary way a board
-         leaves when it resets, so it is not reported as a failure. */
+      /* A disconnect DURING a read throws. That is the ordinary way a board
+         leaves when it resets, and unlike the case above it is not a fault. */
     } finally {
       try { this.reader?.releaseLock(); } catch { /* already released */ }
       this.reader = null;

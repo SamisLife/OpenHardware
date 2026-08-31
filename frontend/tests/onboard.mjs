@@ -148,10 +148,26 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   const s = new Session(silent, () => {});
   await s.connect();
 
-  ok('a silent board is reported as unidentified', s.state.fault?.code === 'no_hello');
+  /* Stopped on FLASH rather than run past it. The rung that asks is the rung
+     whose answer resolves it; faulting two rungs later on IDENTIFY reports the
+     problem a long way from the thing that fixes it. */
+  ok('a silent board stops on the rung that can do something about it',
+     s.state.rungs.flash.state === 'ask', s.state.rungs.flash.state);
+  ok('and it is a decision, not a malfunction',
+     s.state.phase === 'decide' && s.state.fault === null, s.state.phase);
+  ok('the rung says what was heard, which was nothing',
+     /no output/i.test(s.state.rungs.flash.detail), s.state.rungs.flash.detail);
+  ok('IDENTIFY has not run, because nothing has been identified',
+     s.state.rungs.identify.state === 'idle');
   ok('and the connect rung still passed, because it did',
      s.state.rungs.connect.state === 'done',
      'the port opened; that is a different fact from the board answering');
+
+  /* Choosing to wait it out is a real option, and choosing it does make the
+     silence a fault — this time it was asked for. */
+  await s.listen();
+  ok('listening anyway leaves the board alone',
+     s.state.rungs.flash.state === 'skipped', s.state.rungs.flash.state);
   await s.dispose();
 }
 
@@ -172,10 +188,248 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   await s.connect();
 
   ok('a board running something else is distinguished from a silent one',
-     /12 lines arrived/.test(s.state.fault?.observed || ''),
-     s.state.fault?.observed);
+     /12 lines/.test(s.state.rungs.flash.detail || ''), s.state.rungs.flash.detail);
   ok('and what it said is counted rather than characterised',
      s.state.heard.lines === 12);
+  ok('it is offered a decision rather than reported as broken',
+     s.state.phase === 'decide' && s.state.fault === null);
+  await s.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+/* firmware nobody has a name for                                            */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The general case, and the only honest one. Firmware this page cannot read
+     is usually not another version of this project — it is arbitrary — so what
+     can be said about it is how much of it arrived and that none of it was
+     recognised. An earlier version named the framing it saw, which was
+     accurate for exactly one board and a fabricated category everywhere else. */
+  const LINES = [
+    'I (697) esp_psram: SPI SRAM memory test OK',
+    'boot: ESP-IDF v5.1 2nd stage bootloader',
+    'garbage \u0000\u00ff not even text',
+    'READY> ',
+  ];
+
+  const foreign = {
+    ...simulatedDriver(),
+    async fetchManifest() { return { version: '0.11.0', elf_sha8: 'abc123abc123abc1', parts: [] }; },
+    async openPort(_p, handlers) {
+      setTimeout(() => LINES.forEach(l => handlers.onText?.(l, false)), 10);
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  };
+  const s = new Session(foreign, () => {});
+  await s.connect();
+
+  ok('unrecognised firmware is counted, not characterised',
+     s.state.found?.known === false && s.state.found?.lines === 4,
+     JSON.stringify(s.state.found));
+
+  /* The placement is the fix. The question "should this be overwritten" is
+     answered on the rung that would do the overwriting. */
+  ok('the question is asked on the flash rung',
+     s.state.rungs.flash.state === 'ask', s.state.rungs.flash.state);
+  ok('and the rung says only what was observed',
+     /4 lines of output, none recognised/.test(s.state.rungs.flash.detail),
+     s.state.rungs.flash.detail);
+
+  /* A board running something else is not a broken board. */
+  ok('it is a decision, not a malfunction',
+     s.state.phase === 'decide' && s.state.fault === null, s.state.phase);
+  ok('and the flow does not run past the decision',
+     s.state.rungs.identify.state === 'idle' && s.state.rungs.boot.state === 'idle');
+  ok('the version on offer comes from the manifest',
+     s.state.published?.version === '0.11.0', JSON.stringify(s.state.published));
+
+  /* Waiting it out is a real option, and only then is silence a fault. */
+  await s.listen();
+  ok('waiting it out reports what was actually seen',
+     s.state.fault?.code === 'no_hello', s.state.fault?.code);
+  await s.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+/* a board that already speaks the protocol is still asked about             */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* Stopping here costs one click and buys the thing that matters more:
+     writing a fresh image is always one step away, from the same place,
+     without having to reach a failure first. */
+  const hello = {
+    t: 'hello', board_name: 'Board', mac: '02:00:00:00:00:09',
+    fw: '0.10.0', sha: 'aaaaaaaaaaaaaaaa',
+  };
+  const known = {
+    ...simulatedDriver(),
+    async fetchManifest() { return { version: '0.11.0', elf_sha8: 'bbbbbbbbbbbbbbbb', parts: [] }; },
+    async openPort(_p, handlers) {
+      setTimeout(() => handlers.onFrame?.(hello), 10);
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  };
+  const s = new Session(known, () => {});
+  await s.connect();
+
+  ok('a recognised board is asked about too, so re-flashing is always reachable',
+     s.state.phase === 'decide' && s.state.rungs.flash.state === 'ask',
+     `${s.state.phase} / ${s.state.rungs.flash.state}`);
+  ok('and it is described as running, not as a problem',
+     s.state.found?.known === true && s.state.found?.fw === '0.10.0',
+     JSON.stringify(s.state.found));
+  ok('the comparison against the published image is already made',
+     s.state.published?.action === 'differs' && s.state.published?.version === '0.11.0',
+     JSON.stringify(s.state.published));
+  ok('nothing has been written, and no warning is armed',
+     s.state.writing === false && s.state.rungs.boot.state === 'idle');
+
+  /* Carrying on reuses the identity that already answered. Probing again could
+     fail at a question that has been answered. */
+  await s.continueWithBoard();
+  ok('carrying on writes nothing',
+     s.state.rungs.flash.state === 'skipped'
+     && /kept what was on the board/.test(s.state.rungs.flash.detail),
+     s.state.rungs.flash.detail);
+  ok('and goes straight through to identified',
+     s.state.rungs.identify.state === 'done', s.state.rungs.identify.state);
+  ok('reusing the identity that already answered',
+     s.state.hello?.mac === '02:00:00:00:00:09');
+
+  await s.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+/* is the board running what was published?                                  */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* Compared on the ELF hash rather than on the version string. Two builds of
+     different source can carry the same label, so comparing labels compares
+     two claims; comparing hashes compares the artefacts. */
+  const hello = {
+    t: 'hello', board_name: 'Board', mac: '02:00:00:00:00:01',
+    fw: '0.10.0', sha: 'aaaaaaaaaaaaaaaa',
+  };
+
+  const withManifest = (elf, version) => ({
+    ...simulatedDriver(),
+    async fetchManifest() { return { version, elf_sha8: elf, parts: [] }; },
+    async openPort(_p, handlers) {
+      setTimeout(() => handlers.onFrame?.(hello), 10);
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  });
+
+  const differs = new Session(withManifest('bbbbbbbbbbbbbbbb', '0.11.0'), () => {});
+  await differs.connect();
+  await wait(60);
+  ok('a board running something other than the published image says so',
+     differs.state.published?.action === 'differs', JSON.stringify(differs.state.published));
+  ok('and names both sides of the comparison',
+     differs.state.published?.running === '0.10.0'
+     && differs.state.published?.version === '0.11.0');
+  await differs.dispose();
+
+  const same = new Session(withManifest('aaaaaaaaaaaaaaaa', '0.10.0'), () => {});
+  await same.connect();
+  await wait(60);
+  ok('a matching hash is reported as matching',
+     same.state.published?.action === 'same', JSON.stringify(same.state.published));
+  await same.dispose();
+
+  /* The common case, and the one that must stay quiet. */
+  const noServer = {
+    ...simulatedDriver(),
+    async fetchManifest() { throw new Error('no server'); },
+    async openPort(_p, handlers) {
+      setTimeout(() => handlers.onFrame?.(hello), 10);
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  };
+  const quiet = new Session(noServer, () => {});
+  await quiet.connect();
+  await wait(60);
+  ok('no published image is not a fault, and says nothing',
+     quiet.state.published === null && quiet.state.phase !== 'fault',
+     `${quiet.state.phase} / ${JSON.stringify(quiet.state.published)}`);
+  await quiet.dispose();
+
+  /* A manifest predating the field it would be compared on. */
+  const older = {
+    ...simulatedDriver(),
+    async fetchManifest() { return { version: '0.9.0', parts: [] }; },
+    async openPort(_p, handlers) {
+      setTimeout(() => handlers.onFrame?.(hello), 10);
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  };
+  const noField = new Session(older, () => {});
+  await noField.connect();
+  await wait(60);
+  /* The version is still wanted — it labels the button that writes it — but
+     no claim is made about whether the board matches it. Reporting 'same' or
+     'differs' on a manifest with no hash would be inventing the answer. */
+  ok('a manifest with nothing to compare makes no claim about matching',
+     noField.state.published?.action === 'unknown',
+     JSON.stringify(noField.state.published));
+  ok('and still offers the version it could name',
+     noField.state.published?.version === '0.9.0');
+  await noField.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+/* nothing from one attempt may describe another                             */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The failure this whole project exists to prevent, found in its own code.
+     It presented as a screen reporting that nothing identifiable had arrived
+     while, directly underneath, stating which version the board was running —
+     two statements about two different moments, rendered as one situation.
+
+     A stale reading is worse than an absent one: absence is visibly absent,
+     and a stale value looks exactly like a current measurement. */
+  let answer = true;
+  const flaky = {
+    ...simulatedDriver(),
+    async fetchManifest() { return { version: '0.11.0', elf_sha8: 'aaaaaaaaaaaaaaaa', parts: [] }; },
+    async openPort(_p, handlers) {
+      if (answer) {
+        setTimeout(() => handlers.onFrame?.({
+          t: 'hello', board_name: 'Board', mac: '02:00:00:00:00:07',
+          fw: '0.11.0', sha: 'aaaaaaaaaaaaaaaa',
+        }), 10);
+      }
+      return { get open() { return true; }, send: async () => true, stop: async () => {} };
+    },
+  };
+
+  const s = new Session(flaky, () => {});
+  await s.connect();
+  ok('a board that answers is described', s.state.published?.action === 'same'
+     && s.state.found?.known === true, JSON.stringify(s.state.published));
+
+  /* Same session, same board object, and this time it says nothing. */
+  answer = false;
+  await s.connect({ reuse: true });
+
+  /* The version survives, because it names the image on offer and that is
+     still true. What must not survive is the CLAIM — that the board matches
+     it, and which firmware the board was running — because neither was
+     observed this time. */
+  ok('a later attempt inherits no claim about the board',
+     s.state.published?.action === 'unknown' && s.state.published?.running === null,
+     JSON.stringify(s.state.published));
+  ok('though what is published is still known, because it still is',
+     s.state.published?.version === '0.11.0');
+  ok('nor what was found on the board before',
+     s.state.found?.known === false, JSON.stringify(s.state.found));
+  ok('nor the identity that has since stopped answering',
+     s.state.hello === null);
+
   await s.dispose();
 }
 
@@ -186,6 +440,12 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 {
   const s = new Session(simulatedDriver(''), () => {});
   await s.connect();
+
+  /* The simulated board goes through the same decision a real one does. A
+     simulator held to a weaker contract keeps passing after the real path has
+     broken, at which point it has stopped being evidence. */
+  ok('even a board that answers is asked about', s.state.phase === 'decide');
+  await s.continueWithBoard();
 
   ok('the board is identified', s.state.rungs.identify.state === 'done');
   ok('by what it reported about itself',

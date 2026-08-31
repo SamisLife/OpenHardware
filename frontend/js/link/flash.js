@@ -14,8 +14,12 @@
    Specified here, produced later by the packing tool. Offsets come from the
    partition table via the build, never from anything written down twice.
 
-       { name, version, chip, total_bytes,
+       { project, version, chip, total_bytes,
          parts: [ { path, offset, size, sha256 } ] }
+
+   `project` rather than a display name, because the packing tool reads it out
+   of the image's own app descriptor. A prettier label would be a second copy
+   of the same fact, free to drift from the artefact it describes.
 
    `sha256` rather than md5 for one concrete reason: WebCrypto has no MD5, so a
    manifest carrying md5 cannot be verified by a browser without shipping a
@@ -68,7 +72,7 @@ export function loadEsptool(url = ESPTOOL_URL) {
 /* the manifest                                                              */
 /* ------------------------------------------------------------------------ */
 
-export async function fetchManifest(base = '/firmware/') {
+export async function fetchManifest(base = '/firmware/dist/') {
   let res;
   try {
     res = await fetch(new URL('manifest.json', new URL(base, location.origin)),
@@ -141,7 +145,7 @@ export async function sha256Hex(bytes) {
  * download fails while the board is still in a known-good state. Fetched in
  * parallel because they are independent and there are only a handful.
  */
-export async function fetchImages(manifest, base = '/firmware/') {
+export async function fetchImages(manifest, base = '/firmware/dist/') {
   const root = new URL(base, location.origin);
 
   return Promise.all(manifest.parts.map(async part => {
@@ -257,17 +261,18 @@ export async function flashBoard(port, images, opts = {}) {
 /* ------------------------------------------------------------------------ */
 
 /**
- * Wait for a board to reappear after a reset.
+ * Wait for a board to reappear after a reset, WITHOUT opening anything.
  *
- * On hardware with native USB the reset takes the whole USB device off the bus
- * and it returns a second or two later, possibly as a different port object.
+ * For a board that is already running: a hot replug, an OS suspend, a cable
+ * moved between sockets. Opening asserts DTR and RTS, which on this hardware
+ * are wired to reset and boot select — so a probe loop resets the running
+ * board it was supposed to be reattaching to, and takes its uptime and its
+ * boot identity with it. That is a reboot nobody ordered, reported as a
+ * measurement.
  *
- * Deliberately NOT by opening ports to see whether they answer. Opening
- * asserts DTR and RTS, which on this hardware are wired to reset and boot
- * select — so a probe loop resets the board it is waiting for, repeatedly, and
- * can hold it in that state indefinitely. Presence is established by matching
- * USB identifiers, which costs the board nothing, and the port is opened once
- * at the end.
+ * NOT for the moment after a write. See reopenAfterReset() below, which is a
+ * separate function precisely because the right answer there is the opposite
+ * one, and collapsing the two is a defect this file has already had.
  *
  * @returns {SerialPort|null}
  */
@@ -298,6 +303,72 @@ export async function waitForBoard(port, {
   } finally {
     bus?.removeEventListener?.('connect', onConnect);
   }
+}
+
+/**
+ * Get the board back after a write, by opening the port and letting it go.
+ *
+ * ----------------------------------------------------------------------------
+ * THIS ONE PROBES BY OPENING, AND THAT IS THE WHOLE POINT
+ *
+ * The reasoning that forbids opening applies to a board that is running. This
+ * is not that moment. esptool has just reset a chip that was in its ROM
+ * downloader, the board is in a state nothing here knows, and a reset costs
+ * nothing because there is no uptime and no boot identity to lose.
+ *
+ * What the open and the close actually do is drive DTR and RTS through a
+ * complete cycle. On a part with native USB those lines are the reset and
+ * boot-select straps, so the cycle is what leaves the chip reset with the boot
+ * strap released — running the application rather than waiting in the
+ * downloader. Merely opening the port and holding it is not the same thing:
+ * this page then sits with DTR asserted and RTS clear, which is the state that
+ * HOLDS the boot strap down, and a board that resets under it comes back into
+ * download mode. Download mode is silent by design — no protocol frames, and
+ * no boot messages either, which is exactly what a silent board after a
+ * successful write looks like.
+ *
+ * The predecessor project had this function and used it only here, with a
+ * separate identifier-matching one for hot replug. The rebuild kept the second
+ * and used it for both, and the board stopped coming up.
+ *
+ * @returns {SerialPort|null}
+ */
+export async function reopenAfterReset(port, {
+  timeoutMs = 15000, pollMs = 500, onWait, portsLike, baudRate = 115200,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+
+  /* Opened and immediately closed. Holding it here would leave the port locked
+     against the reader that is about to want it, and the open is being done
+     for its effect on the control lines rather than for anything to read. */
+  const cycle = async p => {
+    try {
+      await p.open({ baudRate, bufferSize: 4096 });
+      await p.close();
+      return true;
+    } catch {
+      return false;                    /* not back yet, or not this one */
+    }
+  };
+
+  for (let attempt = 1; Date.now() < deadline; attempt++) {
+    onWait?.(attempt, Math.max(0, deadline - Date.now()));
+
+    /* The handle already held is worth trying first: a reset that
+       re-enumerates into the same slot often leaves it perfectly usable. */
+    if (await cycle(port)) return port;
+
+    /* Otherwise the device came back as a different port object. Only ports
+       already granted are considered — requestPort() needs a user gesture and
+       there is nobody to ask in the middle of a reset. */
+    for (const other of (await portsLike?.(port)) ?? []) {
+      if (other === port) continue;
+      if (await cycle(other)) return other;
+    }
+
+    await sleep(pollMs);
+  }
+  return null;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }

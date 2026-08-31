@@ -43,6 +43,7 @@ static hw_creds_t s_creds;
 static char s_boot_id[9];
 static char s_mac[18];
 static char s_sha[17];
+static char s_fw[32];
 
 /* ------------------------------------------------------------------------ */
 /* identity                                                                  */
@@ -86,10 +87,21 @@ static void read_mac(void)
              m[0], m[1], m[2], m[3], m[4], m[5]);
 }
 
-/** The first eight bytes of the image hash: which build this actually is. */
-static void read_sha(void)
+/**
+ * Which build this actually is, taken from the image rather than from a
+ * constant somebody has to remember to change.
+ *
+ * The version comes from version.txt by way of the app descriptor, and the
+ * hash is the first eight bytes of the ELF's. Between them they answer the two
+ * questions a person actually has — which release is this, and is it the exact
+ * artefact that was published — and the packaging script reads both out of the
+ * same bytes, so a manifest cannot describe an image nobody is running.
+ */
+static void read_build(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
+
+    snprintf(s_fw, sizeof(s_fw), "%s", app->version);
     for (int i = 0; i < 8; i++) {
         snprintf(s_sha + i * 2, 3, "%02x", app->app_elf_sha256[i]);
     }
@@ -144,7 +156,7 @@ static void send_hello(void)
         "\"provisioned\":%s,\"ssid\":\"%s\","
         "\"psram\":%lu,\"flash\":%lu,\"heap\":%lu,\"heap_total\":%lu,"
         "\"temp_crit_c\":85,\"rx\":%lu%s",
-        HW_PROTO_VERSION, HW_FW_VERSION, s_sha,
+        HW_PROTO_VERSION, s_fw, s_sha,
         running ? running->label : "unknown",
         HW_BOARD_ID, HW_BOARD_NAME,
         s_mac, s_boot_id, reset_reason_str(),
@@ -364,11 +376,11 @@ void app_main(void)
     /* 3. Facts about this boot. */
     make_boot_id();
     read_mac();
-    read_sha();
+    read_build();
     hw_sensors_init();
     hw_prov_load(&s_creds);
 
-    ESP_LOGI(TAG, "openhardware %s (%s) on %s", HW_FW_VERSION, s_sha, HW_BOARD_NAME);
+    ESP_LOGI(TAG, "openhardware %s (%s) on %s", s_fw, s_sha, HW_BOARD_NAME);
     ESP_LOGI(TAG, "boot %s, reset %s, %lu KB psram, %d MHz",
              s_boot_id, reset_reason_str(),
              (unsigned long)(hw_sensors_psram_size() / 1024),
