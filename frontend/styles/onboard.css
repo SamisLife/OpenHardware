@@ -17,6 +17,10 @@ body[data-view="onboard"] .console {
 .onboard {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  /* Stated rather than left implicit. An auto row is sized by its content, so
+     the monitor below would size this grid instead of the grid bounding the
+     monitor. */
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--gap);
   background: var(--c-void);
   min-height: 0;
@@ -29,9 +33,19 @@ body[data-view="onboard"] .console {
 .onboard__left,
 .onboard__right {
   background: var(--c-panel);
-  min-width: 0;
   display: flex;
   flex-direction: column;
+
+  /* Both axes, and the height is the one that matters.
+     A grid item's min-height defaults to auto, meaning "never smaller than my
+     content". The monitor inside asks for overflow-y: auto, which needs a
+     height to overflow WITHIN — and with min-height: auto there is never one,
+     because the column simply grows to fit every line instead. The scrollbar
+     then never appears and the lines past the fold cannot be reached at all,
+     which on a panel whose entire job is showing what the board said is the
+     worst place in the interface for it to happen. */
+  min-width: 0;
+  min-height: 0;
 }
 
 .onboard__left { padding: var(--pad); gap: 12px; }

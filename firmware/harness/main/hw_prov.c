@@ -25,6 +25,7 @@ static const char *TAG = "hw_prov";
 #define KEY_SSID   "ssid"
 #define KEY_PSK    "psk"
 #define KEY_SERVER "server"
+#define KEY_CAM    "cam_tries"
 
 esp_err_t hw_prov_init(void)
 {
@@ -98,5 +99,53 @@ esp_err_t hw_prov_erase(void)
     if (err == ESP_OK) err = nvs_commit(h);
 
     nvs_close(h);
+    return err;
+}
+
+/* ------------------------------------------------------------------------ */
+/* the camera probe counter                                                  */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * How many times in a row the board has entered the camera probe.
+ *
+ * Incremented before the attempt and cleared by any attempt that came back —
+ * including one that came back with an error. What it therefore counts is not
+ * failures but disappearances: a probe that returns is evidence the board
+ * survived, whatever the answer was.
+ *
+ * This has to live in flash rather than in a variable. The failure being
+ * guarded against is a call that never returns, and nothing in the process
+ * outlives that. A board that hangs in esp_camera_init() would otherwise come
+ * back and hang in exactly the same place, indefinitely, with no record that
+ * it had ever tried.
+ */
+uint8_t hw_prov_cam_tries(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(HW_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
+
+    uint8_t n = 0;
+    /* A key that has never been written is a board that has never probed,
+       which is zero. Not an error. */
+    if (nvs_get_u8(h, KEY_CAM, &n) != ESP_OK) n = 0;
+    nvs_close(h);
+    return n;
+}
+
+esp_err_t hw_prov_set_cam_tries(uint8_t n)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(HW_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_u8(h, KEY_CAM, n);
+    /* Committed here and not deferred. The whole value of this counter is that
+       it is on the flash before the risky call runs; a write still sitting in
+       a cache when the board dies has recorded nothing. */
+    if (err == ESP_OK) err = nvs_commit(h);
+
+    nvs_close(h);
+    if (err != ESP_OK) ESP_LOGW(TAG, "camera counter not stored: %s", esp_err_to_name(err));
     return err;
 }

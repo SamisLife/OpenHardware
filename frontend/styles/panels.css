@@ -254,7 +254,6 @@
   flex: none;
 }
 
-.panel--vitals { min-height: 0; }
 
 .vital {
   background: var(--c-panel);

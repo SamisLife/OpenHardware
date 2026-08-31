@@ -291,7 +291,14 @@ ul, ol { list-style: none; }
   background: var(--c-panel);
   display: flex;
   flex-direction: column;
+
+  /* Both axes. A grid item's min-height defaults to auto — "never smaller than
+     my content" — so a panel containing a scrolling list grows to fit the
+     whole list instead of bounding it, and the scrollbar its child asked for
+     never appears. On a panel whose job is showing what the board reported,
+     the lines past the fold then cannot be reached at all. */
   min-width: 0;
+  min-height: 0;
 }
 
 /* ---- ≥1100px: a fixed instrument -------------------------------------- */

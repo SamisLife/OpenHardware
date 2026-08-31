@@ -1,0 +1,11 @@
+# Pulled from the component registry at configure time, not vendored.
+#
+# The lock file next to the project is committed, so the exact version that
+# built a given image is recoverable from the history — which matters because
+# esp32-camera changes which I2C driver it compiles against depending on the
+# IDF version, and that choice is what decides whether this firmware boots.
+dependencies:
+  idf:
+    version: ">=5.1"
+  espressif/esp32-camera:
+    version: "^2.0.0"

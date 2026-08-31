@@ -165,6 +165,107 @@ void hw_proto_status(const char *stage, const char *detail)
 uint32_t hw_proto_rx_bytes(void) { return s_rx_total; }
 
 /* ------------------------------------------------------------------------ */
+/* pictures                                                                  */
+/* ------------------------------------------------------------------------ */
+
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** Standard base64 with padding. Returns the number of characters written. */
+static size_t b64_encode(const uint8_t *in, size_t n, char *out)
+{
+    size_t o = 0;
+    size_t i = 0;
+
+    while (i + 3 <= n) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
+        out[o++] = B64[(v >> 18) & 0x3F];
+        out[o++] = B64[(v >> 12) & 0x3F];
+        out[o++] = B64[(v >> 6) & 0x3F];
+        out[o++] = B64[v & 0x3F];
+        i += 3;
+    }
+
+    /* Padded rather than truncated. The far end checks the decoded length
+       against the byte count in the header, and unpadded tail groups decode
+       short — which would fail that check on every image whose length is not a
+       multiple of three, meaning two images in three. */
+    const size_t rem = n - i;
+    if (rem == 1) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        out[o++] = B64[(v >> 18) & 0x3F];
+        out[o++] = B64[(v >> 12) & 0x3F];
+        out[o++] = '=';
+        out[o++] = '=';
+    } else if (rem == 2) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8);
+        out[o++] = B64[(v >> 18) & 0x3F];
+        out[o++] = B64[(v >> 12) & 0x3F];
+        out[o++] = B64[(v >> 6) & 0x3F];
+        out[o++] = '=';
+    }
+    return o;
+}
+
+/* Scratch for one chunk, at file scope for the same reason as the transmit
+   buffers: 648 bytes on the stack of a task nobody has sized for it is the
+   mistake that panics this board. */
+static char s_b64[HW_IMG_CHUNK_RAW * 4 / 3 + 8];
+
+/* Held for a whole image rather than per chunk.
+ *
+ * It protects the scratch above, but that is the smaller half. The real job is
+ * that a reader treats a new header as abandoning whatever was in flight, so
+ * two images interleaving on the wire would not arrive as two damaged pictures
+ * — the first would silently never complete. A contract saying "only one task
+ * may call this" would work until the day something else did. */
+static SemaphoreHandle_t s_img_lock = NULL;
+
+void hw_proto_send_image(const uint8_t *jpeg, size_t len,
+                         uint32_t seq, int w, int h, int q)
+{
+    if (!jpeg || !len) return;
+
+    if (len > HW_IMG_MAX_BYTES) {
+        /* Saying why there is no picture costs one frame. Sending it would
+           occupy the cable long enough for the heartbeat to look like it
+           stopped, turning one oversized capture into an apparently dead
+           board. */
+        hw_proto_sendf("status",
+            "\"stage\":\"frame_too_large\","
+            "\"detail\":\"%u bytes is past the %u byte cable budget\"",
+            (unsigned)len, (unsigned)HW_IMG_MAX_BYTES);
+        return;
+    }
+
+    const size_t chunks = (len + HW_IMG_CHUNK_RAW - 1) / HW_IMG_CHUNK_RAW;
+
+    if (s_img_lock) xSemaphoreTake(s_img_lock, portMAX_DELAY);
+
+    hw_proto_sendf("img",
+        "\"seq\":%lu,\"w\":%d,\"h\":%d,\"q\":%d,\"bytes\":%u,\"chunks\":%u",
+        (unsigned long)seq, w, h, q, (unsigned)len, (unsigned)chunks);
+
+    for (size_t i = 0; i < chunks; i++) {
+        const size_t off = i * HW_IMG_CHUNK_RAW;
+        size_t n = len - off;
+        if (n > HW_IMG_CHUNK_RAW) n = HW_IMG_CHUNK_RAW;
+
+        const size_t m = b64_encode(jpeg + off, n, s_b64);
+        s_b64[m] = '\0';
+
+        /* Indexed, not positional. Chunks are separate frames and any one of
+           them can fail its CRC and be dropped; an index means the far end
+           knows which one went missing instead of reassembling the rest into a
+           picture that is subtly wrong. */
+        hw_proto_sendf("imgd", "\"seq\":%lu,\"i\":%u,\"d\":\"%s\"",
+                       (unsigned long)seq, (unsigned)i, s_b64);
+    }
+
+    if (s_img_lock) xSemaphoreGive(s_img_lock);
+}
+
+/* ------------------------------------------------------------------------ */
 /* receive                                                                   */
 /* ------------------------------------------------------------------------ */
 
@@ -256,6 +357,9 @@ esp_err_t hw_proto_init(hw_proto_cb_t on_frame)
     s_tx_lock = xSemaphoreCreateMutex();
     if (!s_tx_lock) return ESP_ERR_NO_MEM;
 
+    s_img_lock = xSemaphoreCreateMutex();
+    if (!s_img_lock) return ESP_ERR_NO_MEM;
+
     usb_serial_jtag_driver_config_t cfg = {
         .tx_buffer_size = TX_BUF_SZ,
         .rx_buffer_size = RX_BUF_SZ,
@@ -285,6 +389,34 @@ esp_err_t hw_proto_init(hw_proto_cb_t on_frame)
  * this path runs before anything else is up and benefits from having no
  * allocation in it at all.
  */
+/**
+ * Read `"key":true` or `"key":false`.
+ *
+ * Anything that is not literally `true` reads as false, including a key that
+ * is absent and a value that is a string or a number. A command whose argument
+ * did not parse must not be treated as an instruction to turn something on:
+ * the safe reading of a malformed request is the one that does nothing.
+ */
+bool hw_json_bool(const char *json, const char *key)
+{
+    if (!json || !key) return false;
+
+    char pattern[40];
+    int pn = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (pn < 0 || pn >= (int)sizeof(pattern)) return false;
+
+    const char *p = strstr(json, pattern);
+    if (!p) return false;
+    p += pn;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    return strncmp(p, "true", 4) == 0;
+}
+
 bool hw_json_str(const char *json, const char *key, char *out, size_t out_len)
 {
     if (!json || !key || !out || out_len == 0) return false;

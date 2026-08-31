@@ -117,6 +117,9 @@ uint32_t hw_proto_rx_bytes(void);
 /** Copy a JSON string field out of `json`. false when it is absent. */
 bool hw_json_str(const char *json, const char *key, char *out, size_t out_len);
 
+/** Read a JSON boolean. Anything that is not literally `true` reads false. */
+bool hw_json_bool(const char *json, const char *key);
+
 /* ------------------------------------------------------------------------ */
 /* what the board can say about itself                                       */
 /* ------------------------------------------------------------------------ */
@@ -142,3 +145,135 @@ uint32_t hw_sensors_psram_largest(void);
 uint32_t hw_sensors_psram_size(void);
 uint32_t hw_sensors_flash_size(void);
 int      hw_sensors_cpu_mhz(void);
+
+/* ------------------------------------------------------------------------ */
+/* pictures on the wire                                                      */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Raw bytes per chunk. 480 encodes to 640 base64 characters, which leaves the
+ * envelope and the CRC comfortably inside HW_LINE_MAX.
+ *
+ * Mirrored by IMG_CHUNK_RAW in frontend/js/link/protocol.js.
+ */
+#define HW_IMG_CHUNK_RAW   480
+
+/**
+ * The largest image this will put on the cable.
+ *
+ * A cap rather than a best effort. The link is shared with telemetry, and an
+ * oversized frame does not merely arrive late — it occupies the wire long
+ * enough for the heartbeat to look like it stopped, which turns one bad
+ * capture into an apparently dead board.
+ */
+#define HW_IMG_MAX_BYTES   (64 * 1024)
+
+/**
+ * Send one JPEG: a header frame, then indexed base64 chunks.
+ *
+ * Chunked rather than sent as one long line because a bounded reader is a
+ * reader that cannot be made to allocate without limit by anything on the
+ * wire. Each chunk is a frame in its own right and carries its own CRC, so a
+ * corrupted one is dropped rather than painted.
+ *
+ * Safe to call from more than one task: the encoder scratch is held under a
+ * lock for the whole image, which also stops two images from interleaving into
+ * something no reader could separate.
+ */
+void hw_proto_send_image(const uint8_t *jpeg, size_t len,
+                         uint32_t seq, int w, int h, int q);
+
+/* ------------------------------------------------------------------------ */
+/* the camera — the part that can take the board down                        */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * UNTRIED  not looked for yet
+ * OK       initialised, identified, capturing
+ * ABSENT   the probe returned an error — nothing there, or nothing answering
+ * FAULTED  the probe took the board down HW_CAM_MAX_TRIES boots running and
+ *          will not be attempted again until the counter is cleared
+ *
+ * ABSENT and FAULTED are deliberately different. One is a board with no camera
+ * on it, which is the ordinary case and needs no attention. The other is a
+ * board that crashes when it looks, which needs somebody.
+ */
+typedef enum {
+    HW_CAM_UNTRIED = 0,
+    HW_CAM_OK,
+    HW_CAM_ABSENT,
+    HW_CAM_FAULTED,
+} hw_cam_state_t;
+
+/**
+ * Consecutive boots that may die inside the probe before it is abandoned.
+ *
+ * Three, because two is within the range of a marginally seated connector and
+ * the cost of a wrong verdict here is a camera that never works again without
+ * a manual erase.
+ */
+#define HW_CAM_MAX_TRIES   3
+
+/** Shared by the init config and by what gets reported, so they cannot drift. */
+#define HW_CAM_JPEG_QUALITY 12
+
+/** Frame pacing, and the camera task's own tick. */
+#define HW_CAM_FRAME_MS    125
+#define HW_CAM_TICK_MS     25
+
+/**
+ * Every function below must be called from the camera task and no other.
+ *
+ * A framebuffer belongs to the driver that produced it, so a teardown racing a
+ * capture is a use-after-free on memory another task is writing to the cable.
+ * Single ownership removes the race by construction. The two exceptions are
+ * marked: they touch a flag and nothing else.
+ */
+hw_cam_state_t hw_camera_probe(void);
+
+/**
+ * Grab one frame, put it on the wire, and give it back to the driver.
+ *
+ * Capture and send are one call rather than two so that the framebuffer never
+ * leaves the file that owns it. Handing the pointer out and documenting that
+ * the caller must return it would work exactly until somebody returned early;
+ * a buffer that is not given back stalls the pipeline after fb_count grabs,
+ * with no error raised anywhere. It presents as the frame rate collapsing on
+ * its own, which is a diagnosis nobody would reach quickly.
+ *
+ * @return whether a frame was actually sent.
+ */
+bool hw_camera_capture_and_send(uint32_t seq);
+
+hw_cam_state_t hw_camera_state(void);
+const char    *hw_camera_state_str(void);
+const char    *hw_camera_sensor(void);
+int            hw_camera_quality(void);
+
+/** Safe from any task: a volatile flag, read by the owner on its next tick. */
+void hw_camera_set_streaming(bool on);
+bool hw_camera_streaming(void);
+
+/**
+ * @return false when there is no frame rate to report.
+ *
+ * A camera nobody asked to stream is not producing frames, and saying "0 fps"
+ * about it claims a measurement that was never taken. Absent and zero mean
+ * different things, so they travel the wire differently — zero means trying
+ * and getting nothing, which is a fault worth showing.
+ */
+bool hw_camera_fps(float *out);
+
+/* ------------------------------------------------------------------------ */
+/* the camera probe, counted across reboots                                  */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Written to flash BEFORE the attempt it guards, which is the only ordering
+ * that survives a probe that never returns. An in-process counter cannot
+ * outlive the process, so a board that hangs in esp_camera_init() would come
+ * back and hang there again, indefinitely, with nothing recording that it had
+ * ever tried.
+ */
+uint8_t   hw_prov_cam_tries(void);
+esp_err_t hw_prov_set_cam_tries(uint8_t n);
