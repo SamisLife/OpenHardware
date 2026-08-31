@@ -1,0 +1,136 @@
+/* ============================================================================
+   faults.js — what went wrong, kept separate from what it probably means.
+   ----------------------------------------------------------------------------
+   The rule this file exists to enforce:
+
+       A MESSAGE MAY NOT ASSERT A CAUSE THAT WAS NOT OBSERVED.
+
+   It is written down because breaking it is the easiest mistake in this entire
+   project, and the most damaging. A console whose whole product claim is that
+   it tells the truth about hardware can very comfortably say:
+
+       "check the Wi-Fi password"        for a sixty-second timeout
+       "the board is not responding"     for a port this page never released
+       "writing was interrupted"         for a missing firmware file
+       "the claim token may have expired" for a connection that never opened
+
+   Every one of those reads as a diagnosis and is a guess. Each sends someone
+   to fix a thing that was not broken, and the true cause — a leaked handle, a
+   firewall, a file that was never built — goes on being invisible because the
+   interface already gave an answer.
+
+   ----------------------------------------------------------------------------
+   WHY IT IS A DATA SHAPE RATHER THAN A STYLE GUIDE
+
+   Careful wording does not survive contact with a deadline. So the separation
+   is structural: a fault has an `observed` field and a `causes` list, and the
+   renderer prints them under different headings. There is nowhere to put a
+   guess that makes it look like a measurement, because the only field that
+   renders as a statement of fact is the one describing what was seen.
+
+     observed   what actually happened, phrased so it could be checked
+     causes     candidates, in the order worth checking. May be empty.
+     next       the single most useful thing to do about it
+     fatal      whether the flow can continue from here
+   ========================================================================== */
+
+export const FAULTS = {
+  blocked: {
+    observed: 'This page cannot reach a serial port at all.',
+    causes: [],
+    next: 'The reason is shown below. A simulated board is available at ?sim '
+        + 'and exercises the same flow without hardware.',
+    fatal: true,
+  },
+
+  no_port: {
+    observed: 'No port was chosen.',
+    causes: [
+      'the picker was dismissed',
+      'the board is not plugged in',
+      'the cable carries power but not data, which is common and looks '
+        + 'exactly like a dead board',
+    ],
+    next: 'Pick a port again. If the list was empty, try a different cable.',
+  },
+
+  /* Split from port_vanished on one observable: whether the device is still
+     listed. Held-open and gone-away are opposite faults with opposite fixes,
+     and guessing between them sends people to change a cable that is fine. */
+  no_open: {
+    observed: 'The port is still listed on the bus, and it would not open.',
+    causes: [
+      'another tab with this page open',
+      'a serial monitor left running in another program',
+      'an earlier session on this page that has not let go',
+    ],
+    next: 'Reload this page to rule out the last one, then unplug the board and '
+        + 'plug it back in.',
+  },
+
+  port_vanished: {
+    observed: 'The port stopped being listed while it was being opened, twice.',
+    causes: [
+      'the board is resetting repeatedly, which takes the whole USB device off '
+        + 'the bus each time',
+      'a loose cable',
+    ],
+    next: 'Nothing is holding the port — it stopped being there. If the board '
+        + 'is in a boot loop, hold its BOOT button and tap RESET to park it in '
+        + 'the ROM bootloader, which does not reset on its own.',
+  },
+
+  no_hello: {
+    observed: 'The port opened and stayed open, and nothing identifiable arrived.',
+    causes: [
+      'the board is running firmware that does not speak this protocol',
+      'it is sitting in its bootloader rather than running an application',
+      'it is still starting up',
+    ],
+    next: 'Anything the board did say is in the monitor beside this. Look there '
+        + 'first — during bring-up it is usually already the answer.',
+  },
+
+  no_beat: {
+    observed: 'The board identified itself and then sent no telemetry.',
+    causes: [
+      'firmware older than this page expects',
+      'a panic shortly after boot',
+    ],
+    next: 'Check the monitor for a panic just after the identity frame.',
+  },
+
+  link_dropped: {
+    observed: 'The board closed the serial link.',
+    causes: [
+      'it reset',
+      'it was unplugged',
+      'the operating system suspended the device',
+    ],
+    next: 'Connect again. Nothing was written to the board.',
+  },
+};
+
+/**
+ * Build a fault for display.
+ *
+ * `raw` is whatever the underlying API said, kept verbatim and separate. It is
+ * frequently the only precise thing available, and paraphrasing it loses the
+ * one string somebody could search for.
+ */
+export function fault(code, raw = null) {
+  const known = FAULTS[code];
+  if (!known) {
+    /* An unrecognised failure still gets reported honestly rather than being
+       flattened into the nearest familiar one. */
+    return {
+      code,
+      observed: 'Something failed that this page has no specific description for.',
+      causes: [],
+      next: 'The underlying error is below.',
+      raw: raw ? String(raw) : null,
+      fatal: false,
+    };
+  }
+  return { code, ...known, raw: raw ? String(raw) : null };
+}

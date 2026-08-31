@@ -11,10 +11,13 @@
    than incidental — a board that has not reported and a board reporting zeros
    must never look alike.
 
-   ?sim attaches a simulated board. It speaks the real protocol over a real
-   reader, so it exercises the same path a serial port will, and it is
-   dynamically imported so it is never fetched otherwise. Scenes are documented
-   in js/link/sim.js.
+   The page opens on bring-up and only reaches the instrument once a board is
+   actually reporting. Landing on the instrument is an upgrade a board has to
+   earn: arriving there for any remembered identity leaves an operator staring
+   at em-dashes with no way back and no explanation.
+
+   ?sim runs the same flow against a simulated board. Scenes are documented in
+   js/link/sim.js.
    ========================================================================== */
 
 import { state, subscribe, renderAll, applyPeripherals, applyUi } from './state.js';
@@ -23,6 +26,10 @@ import { mountRail, renderRail } from './render/rail.js';
 import { mountVitals, renderVitals } from './render/vitals.js';
 import { mountCamera, renderCamera } from './render/camera.js';
 import { mountPeripherals, renderPeripherals } from './render/peripherals.js';
+import { mountOnboard, renderOnboard, showOnboard, hideOnboard, resetWire } from './render/onboard.js';
+import { Session } from './onboard/session.js';
+import { webSerialDriver, simulatedDriver } from './link/drivers.js';
+import { createFeed } from './link/feed.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -53,6 +60,8 @@ async function setCamera(on) {
   try { await link?.send({ t: 'cam', on }); }
   catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
 }
+
+mountOnboard($('#onboard'), { onConnect: () => connect(), onRetry: () => retry() });
 
 /* The recorder reads the telemetry slice through a function rather than
    importing the model, so it has no opinion about where state lives. */
@@ -114,24 +123,77 @@ function narrate(s, changed) {
 }
 
 /* ------------------------------------------------------------------------ */
+/* bring-up                                                                  */
+/* ------------------------------------------------------------------------ */
+
+const params = new URLSearchParams(location.search);
+const scene = params.get('sim');
+const simulated = scene !== null;
+
+let session = null;
+let feed = null;
+/** Bumped per session, so a callback that outlives its session paints nothing. */
+let generation = 0;
+
+function startOnboarding() {
+  session?.dispose();
+  feed?.stop();
+  feed = null;
+  link = null;
+
+  document.body.dataset.view = 'onboard';
+  showOnboard();
+  resetWire();
+
+  const driver = simulated ? simulatedDriver(scene) : webSerialDriver;
+  const gen = ++generation;
+  const current = new Session(driver, (s, monitor) => {
+    if (gen !== generation) return;
+    renderOnboard(s, monitor);
+    if (s.phase === 'done') goLive(current);
+  });
+  session = current;
+  renderOnboard(current.state, current.monitor);
+}
+
+async function connect() {
+  applyUi({ source: simulated ? 'sim' : 'usb' });
+  await session?.connect();
+}
+
+function retry() {
+  const code = session?.state.fault?.code;
+  session.state.fault = null;
+  /* A port already granted stays granted. Making somebody pick the same board
+     out of a dialog again is friction with nothing behind it. */
+  session?.connect({ reuse: code !== 'no_port' });
+}
+
+/** Hand the open link over to the instrument. */
+let handedOver = false;
+function goLive(s) {
+  if (handedOver) return;
+  handedOver = true;
+
+  hideOnboard();
+  document.body.dataset.view = 'console';
+  link = s.link;
+
+  feed = createFeed({
+    source: simulated ? 'sim' : 'usb',
+    onLost: () => applyUi({ label: 'no telemetry' }),
+  });
+  /* The bring-up session keeps the port; every frame is copied on to the
+     instrument. Closing the link here would stop the telemetry it just
+     established. */
+  s.frameSink = feed.handleFrame;
+
+  applyUi({ label: simulated ? (scene ? `simulated · ${scene}` : 'simulated') : '' });
+}
+
+/* ------------------------------------------------------------------------ */
 /* go                                                                        */
 /* ------------------------------------------------------------------------ */
 
 renderAll();
-
-const sim = new URLSearchParams(location.search).get('sim');
-if (sim !== null) {
-  Promise.all([import('./link/sim.js'), import('./link/feed.js')])
-    .then(([{ SimBoard }, { createFeed }]) => {
-      const feed = createFeed({ source: 'sim' });
-      applyUi({ label: sim ? `simulated board · ${sim}` : 'simulated board' });
-      link = new SimBoard(sim).attach({
-        onFrame: feed.handleFrame,
-        onText: feed.handleText,
-      });
-    })
-    .catch(err => {
-      applyUi({ label: 'simulated board unavailable' });
-      console.error('[openhardware] simulator failed to load', err);
-    });
-}
+startOnboarding();

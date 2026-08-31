@@ -1,0 +1,275 @@
+/* ============================================================================
+   onboard.css — the bring-up view.
+   ----------------------------------------------------------------------------
+   Two columns of equal weight. The ladder on the left says where the flow has
+   got to; the wire on the right says what the board actually said. Giving the
+   wire half the screen is a claim about which of the two is more trustworthy.
+   ========================================================================== */
+
+body[data-view="onboard"] .recorder,
+body[data-view="onboard"] .grid { display: none; }
+body[data-view="console"] .onboard { display: none; }
+
+body[data-view="onboard"] .console {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.onboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  background: var(--c-void);
+  min-height: 0;
+}
+
+@media (min-width: 900px) {
+  .onboard { grid-template-columns: minmax(340px, 1fr) minmax(340px, 1fr); }
+}
+
+.onboard__left,
+.onboard__right {
+  background: var(--c-panel);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.onboard__left { padding: var(--pad); gap: 12px; }
+
+.onboard__lede {
+  font-size: var(--fs-read);
+  line-height: 1.6;
+  color: var(--c-ink-2);
+  max-width: 62ch;
+}
+
+.onboard__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboard__sim {
+  margin-top: auto;
+  font-size: var(--fs-micro);
+  color: var(--c-amber);
+  border-left: 2px solid var(--c-amber-dim);
+  background: var(--c-amber-wash);
+  padding: 7px 9px;
+  line-height: 1.5;
+}
+.onboard__sim[hidden] { display: none; }
+
+/* ------------------------------------------------------------------------ */
+/* a fault, in three parts                                                   */
+/* ------------------------------------------------------------------------ */
+
+/* What was seen gets the weight of a statement, because it is one. */
+.fault__observed {
+  font-size: var(--fs-read);
+  line-height: 1.6;
+  color: var(--c-ink);
+}
+.fault__observed strong {
+  color: var(--c-red);
+  font-weight: 600;
+}
+
+/* Candidates are a list rather than prose, so nothing about them can be read
+   as a determination. */
+.fault__label {
+  margin-top: 11px;
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+}
+.fault__causes {
+  margin-top: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.fault__causes li {
+  font-size: var(--fs-small);
+  color: var(--c-ink-2);
+  padding-left: 14px;
+  position: relative;
+  line-height: 1.5;
+}
+.fault__causes li::before {
+  content: "";
+  position: absolute;
+  left: 3px; top: 8px;
+  width: 4px; height: 1px;
+  background: var(--c-ink-4);
+}
+
+.fault__next {
+  margin-top: 11px;
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--c-ink-2);
+}
+
+/* Whatever the underlying API said, verbatim. Frequently the only precise
+   thing available, and the only string somebody can search for. */
+.fault__raw {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  padding: 7px 9px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-3);
+  background: var(--c-recess);
+  border: 1px solid var(--c-rule);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.notice {
+  padding: 9px 11px;
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  border-radius: var(--radius);
+}
+.notice--block {
+  color: var(--c-amber);
+  background: var(--c-amber-wash);
+  border-left: 2px solid var(--c-amber-dim);
+}
+.notice__alt {
+  margin-top: 6px;
+  font-size: var(--fs-micro);
+  color: var(--c-ink-3);
+  line-height: 1.55;
+}
+.notice__alt a { color: var(--c-ink-2); }
+
+/* ------------------------------------------------------------------------ */
+/* the ladder                                                                */
+/* ------------------------------------------------------------------------ */
+
+.ladder {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--c-rule);
+}
+
+.rung {
+  display: grid;
+  grid-template-columns: auto auto minmax(88px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--c-rule-soft);
+}
+
+.rung__n {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+}
+
+.rung__dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--c-etch);
+  align-self: center;
+}
+
+.rung__title {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+}
+
+.rung__detail {
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rung[data-state="active"] .rung__title { color: var(--c-amber); }
+.rung[data-state="active"] .rung__detail { color: var(--c-ink-2); }
+.rung[data-state="active"] .rung__dot {
+  background: var(--c-amber);
+  border-color: var(--c-amber);
+  box-shadow: 0 0 8px rgba(255, 176, 0, 0.7);
+  animation: rung-pulse 1.4s var(--ease) infinite;
+}
+
+/* A passing rung is grey. Only what needs attention is allowed colour. */
+.rung[data-state="done"] .rung__title { color: var(--c-ink); }
+.rung[data-state="done"] .rung__dot {
+  background: var(--c-ink-3);
+  border-color: var(--c-ink-3);
+}
+
+.rung[data-state="fault"] .rung__title,
+.rung[data-state="fault"] .rung__detail { color: var(--c-red); }
+.rung[data-state="fault"] .rung__dot {
+  background: var(--c-red);
+  border-color: var(--c-red);
+}
+
+@keyframes rung-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .rung[data-state="active"] .rung__dot { animation: none; }
+}
+
+/* ------------------------------------------------------------------------ */
+/* the wire                                                                  */
+/* ------------------------------------------------------------------------ */
+
+.wire__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px var(--pad);
+  border-bottom: 1px solid var(--c-rule);
+  background: linear-gradient(var(--c-panel-hi), var(--c-panel));
+  flex: none;
+}
+
+.wire {
+  flex: 1 1 auto;
+  min-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--c-recess);
+  padding: 6px 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+}
+
+.wire__line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  padding: 1px var(--pad);
+}
+
+.wire__t { color: var(--c-ink-4); }
+
+.wire__x {
+  color: var(--c-ink-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Colour by what a line IS, not by how alarming it sounds. */
+.wire__line[data-kind="frame"] .wire__x { color: var(--c-cyan); }
+.wire__line[data-kind="meta"]  .wire__x { color: var(--c-ink-2); }
+.wire__line[data-kind="error"] .wire__x { color: var(--c-red); }
+.wire__line[data-kind="bad"]   .wire__x { color: var(--c-amber); }

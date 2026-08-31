@@ -14,8 +14,9 @@
 <link rel="stylesheet" href="styles/tokens.css">
 <link rel="stylesheet" href="styles/layout.css">
 <link rel="stylesheet" href="styles/panels.css">
+<link rel="stylesheet" href="styles/onboard.css">
 </head>
-<body data-camera="off">
+<body data-view="onboard" data-camera="off">
 
 <a class="skip" href="#workspace">Skip to the instrument</a>
 
@@ -72,6 +73,32 @@
 
     <p class="sr-only" data-ui="live" role="status" aria-live="polite"></p>
   </header>
+
+
+  <!-- ==================================================================
+       BRING-UP — shown until a board is reporting
+       ================================================================== -->
+  <section class="onboard" id="onboard" aria-labelledby="ob-h">
+    <div class="onboard__left">
+      <h2 class="panel__title" id="ob-h">Bring-up</h2>
+      <div class="onboard__lede" data-ob="lede"></div>
+      <div data-ob="notice"></div>
+      <div class="onboard__actions" data-ob="actions"></div>
+      <ol class="ladder" data-ob="ladder"></ol>
+      <p class="onboard__sim" data-ob="sim" hidden>
+        Simulated board. Everything except the silicon is the production path.
+      </p>
+    </div>
+
+    <div class="onboard__right">
+      <div class="wire__head">
+        <span class="panel__sub">The wire</span>
+        <span class="meta">unedited</span>
+      </div>
+      <div class="wire" data-ob="wire"></div>
+      <p class="empty" data-ob="wire-empty">Nothing on the wire yet.</p>
+    </div>
+  </section>
 
   <!-- ==================================================================
        RECORDER — the loudest thing on the page, and the only thing
