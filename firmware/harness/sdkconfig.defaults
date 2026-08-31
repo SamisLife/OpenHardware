@@ -1,0 +1,84 @@
+# ============================================================================
+# Build configuration. Everything here is a decision, not a leftover.
+# ----------------------------------------------------------------------------
+# Two of these are bootloader settings, which means they can only ever be set
+# by writing a new bootloader over the cable. An over-the-air update cannot
+# turn them on afterwards, so they are on from the first image ever built.
+# ============================================================================
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---- flash -----------------------------------------------------------------
+# The custom table is the whole point; see partitions.csv.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---- rollback --------------------------------------------------------------
+# A bootloader setting. Turning it on later is not something an update can do,
+# so it is on before there is anything to roll back from. An image that boots
+# and never confirms itself healthy is reverted by the bootloader without
+# anyone being present.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ---- PSRAM -----------------------------------------------------------------
+# Octal, at full speed. Without it there is nowhere to put a framebuffer and
+# nothing for a search over resolutions to reason about.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# Wi-Fi and lwIP buffers come out of PSRAM rather than internal DRAM. Internal
+# memory is the scarce resource on this part — roughly 320 KB against 8 MB of
+# PSRAM — and it is what an application layer will be competing for.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---- clock and code size ---------------------------------------------------
+# 240 MHz, not the 160 MHz default. Every measurement this project takes is a
+# claim about what the hardware can sustain, and taking them on a part running
+# at two thirds of its clock makes every one of them wrong in the same
+# direction, invisibly.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Optimised for size rather than for debugging. The same argument: a debug
+# build is slower and larger than anything that would ship, so measuring one
+# measures the wrong binary. Assertions stay on — they are cheap, and a failed
+# assertion is a diagnosis.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
+
+# ---- the console -----------------------------------------------------------
+# There is no UART bridge chip on the reference hardware, so the USB peripheral
+# IS the chip. Logging, the wire protocol and the flasher all share this one
+# endpoint, which is why the protocol has to be self-synchronising.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# ---- what a crash leaves behind --------------------------------------------
+# A panic writes a core dump to flash, so the next boot can report what
+# happened instead of the failure being something nobody was watching for.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# ---- stacks ----------------------------------------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The system event task is shared with the IP stack and defaults to 2304 bytes.
+# Anything that formats a message on it can overflow that, and a stack overflow
+# there panics the whole board — repeatably, on every boot, once the condition
+# is stored in flash. Nothing here should be putting large frames on it, and it
+# gets headroom anyway.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+CONFIG_FREERTOS_HZ=1000
+
+# ---- watchdogs -------------------------------------------------------------
+# A watchdog reset is this firmware giving up, and giving up silently is the
+# one thing it must never do. The timeout is long, and no task here subscribes
+# except the idle tasks, which are excluded so that a busy core is not mistaken
+# for a hung one.
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

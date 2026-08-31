@@ -1,0 +1,35 @@
+# ============================================================================
+# Flash layout — 8 MB, and the one decision here that cannot be taken back.
+# ----------------------------------------------------------------------------
+# THE FACTORY SLOT IS NEVER A TARGET.
+#
+# It holds the image a person flashed over the cable, and nothing that arrives
+# over the air is ever written to it. Images alternate between ota_0 and ota_1
+# instead. That is what makes the last resort meaningful: however badly a
+# generated image behaves, a known-good one is always one rollback away rather
+# than one rollback away from a different broken one.
+#
+# Changing any offset below means re-flashing every board that already exists,
+# over a cable, by hand. So the whole 8 MB is accounted for here at the start —
+# including space nothing uses yet — because claiming it later is not free.
+#
+#   0x000000  bootloader + partition table   (before nvs, written by the build)
+#   0x009000  nvs         24 KB   credentials and counters that outlive a boot
+#   0x00F000  otadata      8 KB   which slot the bootloader should start
+#   0x011000  phy_init     4 KB   radio calibration
+#   0x020000  factory   1.875 MB  the image a person flashed. Never a target.
+#   0x200000  ota_0     1.875 MB  \  images alternate between these two, so a
+#   0x3E0000  ota_1     1.875 MB  /  failed one never overwrites the last good
+#   0x5C0000  coredump    64 KB   what a panic left behind, read on next boot
+#   0x5D0000  storage   2.1875 MB reserved. Unallocated space cannot be claimed
+#                                 later without repartitioning every board.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0x9000,    0x6000,
+otadata,    data, ota,      0xF000,    0x2000,
+phy_init,   data, phy,      0x11000,   0x1000,
+factory,    app,  factory,  0x20000,   0x1E0000,
+ota_0,      app,  ota_0,    0x200000,  0x1E0000,
+ota_1,      app,  ota_1,    0x3E0000,  0x1E0000,
+coredump,   data, coredump, 0x5C0000,  0x10000,
+storage,    data, spiffs,   0x5D0000,  0x230000,
