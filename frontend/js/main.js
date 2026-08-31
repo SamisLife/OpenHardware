@@ -5,15 +5,16 @@
    changed decides which renderers run, so a burst of telemetry does not repaint
    a camera panel that nothing touched.
 
-   There is no source attached yet. The page therefore opens showing exactly
-   what it knows, which is nothing: em-dashes across every readout, blank paper
-   advancing on the recorder, and a badge saying NO SOURCE. That empty state is
-   a designed state rather than a placeholder — a board that has not reported
-   and a board reporting zeros must never look alike, and the only way to be
-   sure of that is for the nothing case to be the first one built.
+   With no source attached the page opens showing exactly what it knows, which
+   is nothing: em-dashes across every readout, blank paper advancing on the
+   recorder, and a badge saying NO SOURCE. That empty state is designed rather
+   than incidental — a board that has not reported and a board reporting zeros
+   must never look alike.
 
-   A development harness can be attached with ?dev — see js/dev/feed.js. It is
-   dynamically imported so it is never fetched in ordinary use.
+   ?sim attaches a simulated board. It speaks the real protocol over a real
+   reader, so it exercises the same path a serial port will, and it is
+   dynamically imported so it is never fetched otherwise. Scenes are documented
+   in js/link/sim.js.
    ========================================================================== */
 
 import { state, subscribe, renderAll, applyPeripherals, applyUi } from './state.js';
@@ -32,13 +33,26 @@ const $ = sel => document.querySelector(sel);
 mountRail($('#rail'));
 mountVitals($('#vitals'));
 mountCamera($('#camera'));
+/** Set once a transport is attached; the camera offer writes through it. */
+let link = null;
+
 mountPeripherals($('#vitals'), {
-  /* No transport exists yet to carry the request. Recording the answer still
-     matters: it is what stops the offer reappearing every time the board
-     re-reports what is attached. */
-  onCamera: () => applyPeripherals({ cameraAsked: true }),
+  onCamera: on => setCamera(on),
   onCameraDecline: () => applyPeripherals({ cameraAsked: true }),
 });
+
+/**
+ * Ask the board to start or stop capturing.
+ *
+ * Recording that the question was answered matters even when there is no
+ * transport to carry it: it is what stops the offer reappearing every time the
+ * board re-reports what is attached.
+ */
+async function setCamera(on) {
+  applyPeripherals({ cameraAsked: true });
+  try { await link?.send({ t: 'cam', on }); }
+  catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
+}
 
 /* The recorder reads the telemetry slice through a function rather than
    importing the model, so it has no opinion about where state lives. */
@@ -105,12 +119,19 @@ function narrate(s, changed) {
 
 renderAll();
 
-const dev = new URLSearchParams(location.search).get('dev');
-if (dev !== null) {
-  import('./dev/feed.js')
-    .then(m => m.startDevFeed(dev))
+const sim = new URLSearchParams(location.search).get('sim');
+if (sim !== null) {
+  Promise.all([import('./link/sim.js'), import('./link/feed.js')])
+    .then(([{ SimBoard }, { createFeed }]) => {
+      const feed = createFeed({ source: 'sim' });
+      applyUi({ label: sim ? `simulated board · ${sim}` : 'simulated board' });
+      link = new SimBoard(sim).attach({
+        onFrame: feed.handleFrame,
+        onText: feed.handleText,
+      });
+    })
     .catch(err => {
-      applyUi({ label: 'development feed unavailable' });
-      console.error('[openhardware] dev feed failed to load', err);
+      applyUi({ label: 'simulated board unavailable' });
+      console.error('[openhardware] simulator failed to load', err);
     });
 }

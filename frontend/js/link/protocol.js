@@ -58,6 +58,22 @@ export const SENTINEL = '#OHW1 ';
  */
 export const LINE_MAX = 768;
 
+/**
+ * Raw bytes per image chunk.
+ *
+ * An image cannot fit in one line, so it travels as a header naming its size
+ * and chunk count, followed by that many indexed base64 chunks:
+ *
+ *     #OHW1 {"t":"img","seq":9,"w":800,"h":600,"bytes":30112,"chunks":63} *….
+ *     #OHW1 {"t":"imgd","seq":9,"i":0,"d":"<640 base64 characters>"} *….
+ *
+ * 480 raw bytes encode to exactly 640 base64 characters, which leaves room for
+ * the envelope inside LINE_MAX. Each chunk carries its own CRC, so a corrupted
+ * one is dropped rather than painted, and chunks are indexed rather than
+ * assumed to arrive in order.
+ */
+export const IMG_CHUNK_RAW = 480;
+
 const encoder = new TextEncoder();
 
 /* ------------------------------------------------------------------------ */
