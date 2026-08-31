@@ -73,12 +73,13 @@ export function loadEsptool(url = ESPTOOL_URL) {
 /* ------------------------------------------------------------------------ */
 
 export async function fetchManifest(base = '/firmware/dist/') {
+  const url = new URL('manifest.json', new URL(base, location.origin));
+
   let res;
   try {
-    res = await fetch(new URL('manifest.json', new URL(base, location.origin)),
-                      { cache: 'no-store' });
+    res = await fetch(url, { cache: 'no-store' });
   } catch (err) {
-    const e = new Error(`could not reach the server: ${err.message}`);
+    const e = new Error(`could not reach ${url.href}: ${err.message}`);
     e.code = 'no_server';
     throw e;
   }
@@ -87,8 +88,14 @@ export async function fetchManifest(base = '/firmware/dist/') {
     /* The code comes from the status, not from the response body. A plain file
        server answers a missing manifest with an HTML 404 and no JSON at all,
        and reading the body to identify the failure is how a missing image once
-       got reported as an interrupted write. */
-    const e = new Error(`no firmware image published (HTTP ${res.status})`);
+       got reported as an interrupted write.
+
+       The URL is named because the most common cause of a 404 here is a file
+       server rooted somewhere other than the repository — at which point the
+       page loads perfectly and only this one path is missing. Reporting "no
+       firmware published" without saying what was asked for turns a one-line
+       fix into an investigation. */
+    const e = new Error(`no firmware image published — ${url.href} returned HTTP ${res.status}`);
     e.code = 'no_manifest';
     throw e;
   }

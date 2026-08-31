@@ -21,6 +21,13 @@ THE PORT IS EXCLUSIVE, MACHINE-WIDE
     Removing the browser from the picture is what makes the reading evidence
     about the firmware instead of evidence about the whole stack.
 
+IT WRITES EXACTLY ONE THING, AND ONLY WHEN ASKED
+    --prov hands a board its network credentials and then goes on watching, so
+    the acknowledgement and the join it triggers land on the same record as
+    everything else. That is the only frame this tool ever sends. It is here
+    because the port is exclusive: something has to be able to provision a
+    board while the page that would normally do it cannot hold the port.
+
 WHAT IT IS ACTUALLY FOR
     The board already reports everything needed to tell a reboot from a stall:
     `reset` and `boot_id` in every identity frame, `uptime_s` in every beat. It
@@ -34,6 +41,7 @@ WHAT IT IS ACTUALLY FOR
 
 import argparse
 import json
+import re
 import sys
 import time
 
@@ -59,6 +67,13 @@ except ImportError:
 SENTINEL = '#OHW1 '
 LINE_MAX = 768
 
+# A frame is anything shaped like one: a hash, four characters, a space. Only
+# the exact sentinel above is decoded, but recognising the others is what lets
+# a board running somebody else's firmware be reported as that, rather than as
+# a board that said nothing. The predecessor project's sentinel is the one that
+# actually turns up, because the same hardware runs both.
+FOREIGN_RE = re.compile(r'^#([A-Z0-9]{4}) \{')
+
 # Six missed beats at 4 Hz. Past this the board has stopped reporting, which is
 # a fact worth a line on the record rather than a gap nobody notices.
 SILENCE_S = 1.5
@@ -82,6 +97,28 @@ def crc16(data: bytes) -> int:
         for _ in range(8):
             crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
     return crc
+
+
+def encode_frame(obj) -> bytes:
+    """
+    One object as a framed line, newline included.
+
+    The only thing this tool ever writes. It exists so that credentials can be
+    handed to a board without a browser: the port is exclusive machine-wide, so
+    while this is watching a join happen it is the only thing that could have
+    started one.
+
+    Refused rather than truncated when it will not fit. A frame the far end is
+    guaranteed to drop is better rejected here, where the caller is still
+    standing there, than sent and silently ignored.
+    """
+    body = json.dumps(obj, separators=(',', ':'))
+    raw = body.encode('utf-8')
+    line = '%s%s *%04X\n' % (SENTINEL, body, crc16(raw))
+    if len(line) > LINE_MAX:
+        raise ValueError('frame is %d characters, over the %d limit'
+                         % (len(line), LINE_MAX))
+    return line.encode('utf-8')
 
 
 def decode_line(line):
@@ -339,6 +376,8 @@ class Watch:
         self.bad = {}
         self.text_lines = 0
         self.enumerations = 0
+        # Sentinels seen that are not this protocol's, by name and count.
+        self.foreign = {}
 
     # ---- boots ----------------------------------------------------------
 
@@ -461,6 +500,22 @@ class Watch:
 
     def text(self, line, reason):
         self.text_lines += 1
+
+        m = FOREIGN_RE.match(line)
+        if m:
+            tag = m.group(1)
+            first = tag not in self.foreign
+            self.foreign[tag] = self.foreign.get(tag, 0) + 1
+            # Said once per sentinel. A board speaking a different protocol
+            # emits these at 4 Hz, and the finding is the sentinel, not the
+            # count of how often it repeated.
+            if first:
+                self.out.line('bad', '! this board speaks #%s, not %s — its frames '
+                                     'are readable but not this protocol'
+                              % (tag, SENTINEL.strip()))
+            self.out.line('text', '  %s' % line)
+            return
+
         if reason:
             self.reject(reason)
             self.out.line('bad', '! %s (%s)' % (line, reason))
@@ -496,6 +551,10 @@ class Watch:
                     plural(self.text_lines, 'line'),
                     plural(self.enumerations, 'bus disappearance')))
 
+        for tag, n in sorted(self.foreign.items()):
+            out.line('bad', '   %s framed as #%s, a protocol this tool does not read'
+                     % (plural(n, 'line'), tag))
+
         # The boot still running has no recorded duration — it has not ended —
         # so its figure comes from the last beat instead. Absent stays absent
         # for any boot whose beats were missed entirely.
@@ -530,6 +589,15 @@ class Watch:
             # the only honest option.
             out.line('bad', '   Beats arrived but none carried a boot_id, so nothing here can '
                             'tell a restart from a stall.')
+        elif self.foreign:
+            # The difference between "silent" and "speaking a language this
+            # tool does not read" is the whole finding, and reporting the
+            # second as the first sends somebody to debug a working board.
+            worst = max(self.foreign.items(), key=lambda kv: kv[1])
+            out.line('boot', '   This board is running other firmware. It sent %s framed as '
+                             '#%s, which is not %s, so none of it could be decoded here.'
+                     % (plural(worst[1], 'frame'), worst[0], SENTINEL.strip()))
+            out.line('boot', '   The board is fine. Flash the published image and run this again.')
         else:
             out.line('bad', '   No beats arrived at all. Nothing here distinguishes a board that '
                             'is not running from one whose output never reached this port.')
@@ -549,7 +617,7 @@ def plural(n, noun):
 
 # ---------------------------------------------------------------------------
 
-def run(port_name, args, out, watch):
+def run(port_name, args, out, watch, prov=None):
     """
     Read until interrupted, reconnecting when the board leaves the bus.
 
@@ -561,6 +629,10 @@ def run(port_name, args, out, watch):
     reader = LineReader()
     port = None
     said_why = False
+    # Sent once, on the first open. Not on a reconnect: the board already has
+    # it, and re-provisioning a board mid-join would restart the very attempt
+    # this is watching.
+    pending_prov = prov
 
     while True:
         if port is None:
@@ -568,6 +640,16 @@ def run(port_name, args, out, watch):
                 port = open_port(port_name, args.baud)
                 out.line('meta', '   listening on %s' % port_name)
                 said_why = False
+
+                if pending_prov is not None:
+                    # After the port is open and before anything is read, so
+                    # the acknowledgement and the join that follows it are both
+                    # on the record from the beginning.
+                    port.write(encode_frame(pending_prov))
+                    out.line('meta', '   > prov %s%s' % (
+                        pending_prov['ssid'],
+                        ' (with a passphrase)' if pending_prov.get('psk') else ' (open network)'))
+                    pending_prov = None
             except serial.SerialException as err:
                 # Said once, then retried quietly. A board that has just reset
                 # is away for a second and does not need a line about it every
@@ -634,7 +716,29 @@ def main():
                    help='print every beat rather than only what changes')
     p.add_argument('--log', help='write the same lines, uncoloured, to a file')
     p.add_argument('--no-color', action='store_true')
+
+    p.add_argument('--prov', metavar='SSID',
+                   help='hand the board this network, then watch it join')
+    p.add_argument('--psk', metavar='PASSPHRASE',
+                   help='the passphrase for --prov. Omit it and it is asked for '
+                        'without echoing, which keeps it out of the shell history; '
+                        'pass an empty string for an open network')
+    p.add_argument('--server', metavar='URL',
+                   help='optional device API base URL, stored alongside the network')
     args = p.parse_args()
+
+    prov = None
+    if args.prov:
+        psk = args.psk
+        if psk is None:
+            # Asked for rather than taken from argv. A passphrase on a command
+            # line survives in the shell history of whoever ran it, and this
+            # one is going to a board somebody else may later own.
+            import getpass
+            psk = getpass.getpass('passphrase for %s (blank if open): ' % args.prov)
+        prov = {'t': 'prov', 'ssid': args.prov, 'psk': psk}
+        if args.server:
+            prov['server'] = args.server
 
     if serial is None:
         sys.exit('monitor.py needs pyserial to reach a port:\n\n    pip install pyserial\n')
@@ -647,7 +751,7 @@ def main():
     out.line('meta', '   watching %s · Ctrl-C to stop' % port_name)
 
     try:
-        run(port_name, args, out, watch)
+        run(port_name, args, out, watch, prov=prov)
     except KeyboardInterrupt:
         pass
     finally:

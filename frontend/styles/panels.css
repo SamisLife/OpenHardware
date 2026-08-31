@@ -387,3 +387,174 @@
   color: var(--c-ink-4);
   line-height: 1.5;
 }
+
+
+/* ===========================================================================
+   THE AGENT PANELS
+   ---------------------------------------------------------------------------
+   Ported from the predecessor project along with js/builder/. The rules are
+   unchanged apart from the token names; they were written against the same
+   design language and there was nothing to gain from restating them.
+
+   The one thing worth reading here is how a simulated step is drawn. A build
+   log showing a flash that did not happen is worse than no build log, so
+   anything the loop did not really do carries `data-sim` and is rendered
+   differently — dimmed and labelled — rather than being made to look like the
+   steps that were real.
+   ========================================================================= */
+.btn--ghost { background: transparent; }
+
+/* ========================================================================= */
+/* WORK ORDER + BUILD LOG                                                    */
+/* ========================================================================= */
+
+.order {
+  padding: 11px var(--pad) 12px;
+  border-bottom: 1px solid var(--c-rule);
+  flex: none;
+}
+
+.log {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---- one attempt ------------------------------------------------------- */
+
+.attempt {
+  border-bottom: 1px solid var(--c-rule);
+  padding: 11px var(--pad) 13px;
+}
+
+.attempt.is-live { background: linear-gradient(90deg, var(--c-amber-wash), transparent 62%); }
+
+.attempt.is-live { border-left: 2px solid var(--c-amber); padding-left: calc(var(--pad) - 2px); }
+
+.step {
+  display: grid;
+  grid-template-columns: 12px 96px 1fr auto auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  background: var(--c-recess);
+  font-size: var(--fs-micro);
+}
+
+.step[data-status="pass"] .step__glyph    { background: var(--c-ink-3); border-color: var(--c-ink-3); }
+
+.step[data-status="fail"] .step__glyph    { background: var(--c-red); border-color: var(--c-red); }
+
+.step[data-status="skipped"] .step__glyph { border-style: dashed; }
+
+.step[data-status="running"] .step__glyph {
+  background: var(--c-amber); border-color: var(--c-amber);
+  animation: blink 700ms steps(1, end) infinite;
+}
+
+.step[data-status="fail"] .step__label { color: var(--c-red); }
+
+.step[data-status="running"] .step__label { color: var(--c-amber); }
+
+.step[data-status="skipped"] .step__label { color: var(--c-ink-4); }
+
+/* ---- reasoning --------------------------------------------------------- */
+
+.reason {
+  border-left: 1px solid var(--c-etch);
+  padding-left: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.reason dt {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+}
+
+.reason dd {
+  font-size: var(--fs-small);
+  line-height: 1.55;
+  color: var(--c-ink-2);
+  max-width: 76ch;
+}
+
+/* ---- approval gate ----------------------------------------------------- */
+
+.gate {
+  margin-top: 11px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-amber-dim);
+  background: var(--c-amber-wash);
+  border-radius: var(--radius);
+}
+
+.gate[data-state="approved"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  border-color: var(--c-etch);
+  background: var(--c-recess);
+}
+
+.gate[data-state="approved"] .gate__mark { color: var(--c-ink-2); }
+
+.fw { width: 100%; border-collapse: collapse; }
+
+.fw th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: left;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+  background: var(--c-panel);
+  padding: 7px var(--pad-tight);
+  border-bottom: 1px solid var(--c-rule);
+}
+
+.fw th:first-child { padding-left: var(--pad); }
+
+.fw td {
+  font-size: var(--fs-micro);
+  color: var(--c-ink-2);
+  padding: 6px var(--pad-tight);
+  border-bottom: 1px solid var(--c-rule-soft);
+  white-space: nowrap;
+}
+
+.fw td:first-child { padding-left: var(--pad); }
+
+.fw tr[data-outcome="active"] .fw__ver { color: var(--c-amber); }
+
+.fw tr[data-outcome="rolled_back"] .fw__ver { color: var(--c-ink-3); text-decoration: line-through; }
+
+/* ---- learned limits ---------------------------------------------------- */
+
+.limits { padding: 4px 0 10px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+
+/* ==========================================================================
+   COMPOSE — writing a work order
+   --------------------------------------------------------------------------
+   The resting state of the agent panel. It reads as a form on an instrument,
+   not as a chat: one field, one action, and a live read-back of what the
+   sentence parsed to. No colour until something is actually understood.
+   ========================================================================== */
+
+.compose {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: var(--pad);
+  border-bottom: 1px solid var(--c-rule-soft);
+}
+
+.compose[hidden] { display: none; }
+
+.step[data-sim="true"] .step__label { color: var(--c-ink-3); }

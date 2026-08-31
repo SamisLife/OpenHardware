@@ -33,11 +33,33 @@
        nocam    no camera attached, so the panel has to disappear
        green    the camera returns a uniform green field — an unwritten
                 framebuffer, the failure a compiler cannot catch
+       badwifi  accepts credentials and never associates, so the retry and the
+                backoff can be watched instead of imagined
    ========================================================================== */
 
 import { encodeFrame, FrameReader, IMG_CHUNK_RAW } from './protocol.js';
+import { LADDER, fbBytes, pixels } from '../builder/plan.js';
 
 const MB = 1024 * 1024;
+
+/**
+ * What this board can do per frame size, so `cfg` changes what is measured.
+ *
+ * Throughput is one constant in pixels per second, calibrated to the rate the
+ * board has always reported at VGA, and capped where an OV-series sensor at a
+ * 20 MHz clock actually caps. Memory is one pool that the framebuffers are
+ * carved out of, so a bigger size leaves a smaller largest block — which is
+ * the trade the search exists to discover. Both are models, and both follow
+ * the same ladder the planner walks, or an experiment against this board
+ * would prove nothing about the real one.
+ */
+const PIXELS_PER_S = 8.3 * 640 * 480;
+const FPS_CEILING = 30;
+const DEFAULT_CFG = { size: 'VGA', quality: 12 };
+const PSRAM_POOL = 3.1 * MB + fbBytes(LADDER.find(s => s.name === 'VGA'), 2);
+
+const fpsFor = size => Math.min(FPS_CEILING, PIXELS_PER_S / pixels(size));
+const largestFor = size => PSRAM_POOL - fbBytes(size, 2);
 
 /** Cadences, matching what the harness is specified to emit. */
 const BEAT_MS = 250;
@@ -72,8 +94,24 @@ export class SimBoard {
     this.gone = false;
 
     this.hasCamera = this.scene !== 'nocam';
+
+    /* Nothing is provisioned until something provisions it, exactly as on a
+       board fresh out of the flasher. */
+    this.net = 'offline';
+    this.ssid = '';
+    this.ip = null;
+    this.rssi = null;
+    this.retryMs = 1000;
     this.cameraUp = false;
+
+    /* The configuration the camera is running. Changeable at runtime through
+       `cfg`, which the firmware does not yet support — so the simulator leads,
+       and the tools are proven against it first. */
+    this.cfg = { ...DEFAULT_CFG };
   }
+
+  /** The ladder entry for the running config. */
+  get size() { return LADDER.find(s => s.name === this.cfg.size) || LADDER[4]; }
 
   /* ---- the link ---------------------------------------------------------
      The same object a serial port presents. `open` included: without it a
@@ -151,6 +189,10 @@ export class SimBoard {
       temp_crit_c: 85,
       heap: 190000,
       temp_c: round(this.tempC, 1),
+      provisioned: !!this.ssid,
+      ssid: this.ssid,
+      net: this.net,
+      ...(this.ip === null ? {} : { ip: this.ip }),
     });
   }
 
@@ -161,16 +203,20 @@ export class SimBoard {
       uptime_s: round(age, 2),
       temp_c: round(this.tempC, 2),
       heap_free: Math.round(190000 + Math.sin(age / 7) * 9000),
-      psram_free: Math.round(6.1 * MB + Math.sin(age / 11) * 0.2 * MB),
-      psram_largest: Math.round(3.1 * MB),
-      /* A cable-tethered board has no association. Reporting a plausible
-         signal strength here would be inventing one. */
-      rssi: 0,
+      psram_free: Math.round(6.1 * MB - fbBytes(this.size, 2) + Math.sin(age / 11) * 0.2 * MB),
+      psram_largest: Math.round(largestFor(this.size)),
       cpu_mhz: 240,
-      fps: this.streaming && this.cameraUp ? round(8.3 + Math.sin(age / 3) * 0.5, 2) : 0,
+      fps: this.streaming && this.cameraUp
+        ? round(fpsFor(this.size) * (1 + Math.sin(age / 3) * 0.06), 2)
+        : 0,
       boot_id: 'sim00001',
       cam: this.cameraUp ? 'ok' : this.hasCamera ? 'untried' : 'absent',
-      net: 'offline',
+      net: this.net,
+      /* Omitted rather than sent as zero, because the firmware omits it and a
+         simulator held to a weaker contract stops being evidence. Zero dBm is
+         an extraordinarily strong signal, so a panel fed zero for an
+         unassociated board draws full bars. */
+      ...(this.rssi === null ? {} : { rssi: this.rssi }),
     });
   }
 
@@ -184,7 +230,37 @@ export class SimBoard {
       psram: 8 * MB,
       flash: 8 * MB,
       streaming: this.streaming,
+      /* Advertised rather than assumed by the page. A real board running
+         firmware without this command says nothing here, and the page then
+         knows not to offer it. */
+      cfg: true,
+      config: { ...this.cfg },
     });
+  }
+
+  /**
+   * Change what the camera is running, and say what happened.
+   *
+   * The acknowledgement carries what was applied, not what was asked, and a
+   * size whose framebuffers do not fit the pool is refused with the error the
+   * driver would give — so a tool that trusts the ack over its own request is
+   * told the truth by this board exactly as it would be by a real one.
+   */
+  configure(obj) {
+    const size = LADDER.find(s => s.name === String(obj.size || '').toUpperCase());
+    if (!size) return this.emit({ t: 'cfg_ack', ok: false, err: 'ESP_ERR_INVALID_ARG' });
+    if (!this.cameraUp) return this.emit({ t: 'cfg_ack', ok: false, err: 'no camera' });
+
+    const q = Number(obj.quality);
+    const quality = Number.isFinite(q) ? Math.max(10, Math.min(63, Math.round(q))) : this.cfg.quality;
+
+    if (fbBytes(size, 2) > PSRAM_POOL) {
+      return this.emit({ t: 'cfg_ack', ok: false, err: 'ESP_ERR_NO_MEM' });
+    }
+
+    this.cfg = { size: size.name, quality };
+    this.emit({ t: 'cfg_ack', ok: true, size: size.name, quality });
+    this.sendCaps();
   }
 
   sendStatus(stage, detail, extra = {}) {
@@ -212,6 +288,62 @@ export class SimBoard {
       this.streaming = on;
       return this.emit({ t: 'cam_ack', on });
     }
+    if (obj.t === 'prov') return this.provision(obj);
+    if (obj.t === 'cfg') return this.configure(obj);
+  }
+
+  /**
+   * Store credentials and try to join, the way the harness does.
+   *
+   * The acknowledgement quotes what was stored rather than what was sent, and
+   * never quotes the passphrase — `has_psk` is the part the other end does not
+   * already know. Matching the firmware here is the whole point of the
+   * simulator: an ack shaped differently would let the page pass against this
+   * board and fail against a real one.
+   */
+  provision(obj) {
+    const ssid = typeof obj.ssid === 'string' ? obj.ssid.trim() : '';
+    if (!ssid) {
+      return this.emit({ t: 'prov_ack', ok: false, err: 'no ssid' });
+    }
+
+    this.ssid = ssid;
+    this.emit({
+      t: 'prov_ack', ok: true, err: '',
+      ssid, server: typeof obj.server === 'string' ? obj.server : '',
+      has_psk: !!obj.psk,
+    });
+
+    this.net = 'joining';
+    this.retryMs = 1000;
+    this.sendStatus('wifi_join', ssid);
+
+    if (this.scene === 'badwifi') return this.after(900, () => this.wifiFail());
+
+    this.after(1400, () => {
+      this.net = 'online';
+      this.ip = '192.168.1.' + (40 + (ssid.length % 60));
+      this.rssi = -52;
+      this.sendStatus('wifi_ok', ssid, { ip: this.ip });
+      this.sendHello();
+    });
+  }
+
+  /** Never gives up, exactly as the firmware never does. */
+  wifiFail() {
+    this.net = 'retrying';
+    this.ip = null;
+    this.rssi = null;
+    this.sendStatus('wifi_fail', 'the access point rejected the password', {
+      reason: 15, retry_ms: this.retryMs,
+    });
+    const wait = this.retryMs;
+    this.retryMs = Math.min(this.retryMs * 2, 30000);
+    this.after(wait, () => {
+      this.net = 'joining';
+      this.sendStatus('wifi_join', this.ssid);
+      this.after(700, () => this.wifiFail());
+    });
   }
 
   /* ---- the model ------------------------------------------------------- */
@@ -252,8 +384,9 @@ export class SimBoard {
 
     const seq = ++this.seq;
     const chunks = Math.ceil(jpeg.length / IMG_CHUNK_RAW);
+    const { w, h } = this.size;
 
-    this.emit({ t: 'img', seq, w: 640, h: 480, q: 12, bytes: jpeg.length, chunks });
+    this.emit({ t: 'img', seq, w, h, q: this.cfg.quality, bytes: jpeg.length, chunks });
     for (let i = 0; i < chunks; i++) {
       const slice = jpeg.subarray(i * IMG_CHUNK_RAW, (i + 1) * IMG_CHUNK_RAW);
       this.emit({ t: 'imgd', seq, i, d: base64(slice) });
@@ -263,10 +396,14 @@ export class SimBoard {
   async capture() {
     if (typeof document === 'undefined') return null;
     try {
+      const { w, h } = this.size;
       const c = document.createElement('canvas');
-      c.width = 640; c.height = 480;
-      this.paint(c.getContext('2d'), 640, 480);
-      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.55));
+      c.width = w; c.height = h;
+      this.paint(c.getContext('2d'), w, h);
+      /* The encoder's 0..1 quality from the driver's 10..63, where lower is
+         better — so a real change in `cfg` is a real change in bytes. */
+      const enc = Math.max(0.2, Math.min(0.95, 1 - (this.cfg.quality - 10) / 60));
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', enc));
       if (!blob) return null;
       return new Uint8Array(await blob.arrayBuffer());
     } catch {

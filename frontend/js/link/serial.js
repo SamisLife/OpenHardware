@@ -24,7 +24,7 @@
    matching USB identifiers among ports already granted, never by opening one.
    ========================================================================== */
 
-import { FrameReader } from './protocol.js';
+import { FrameReader, encodeFrame } from './protocol.js';
 
 const encoder = new TextEncoder();
 
@@ -105,6 +105,8 @@ export class BoardPort {
     this._pump = null;
     /** Bytes that actually arrived. The denominator for "nothing came back". */
     this.bytes = 0;
+    /** Held for the life of the port. See _getWriter. */
+    this._writer = null;
     /** Why the read loop never attached, or null. See _read(). */
     this.readerFailed = null;
     /** Set by stop(), so a close that was asked for is not reported as news. */
@@ -196,6 +198,10 @@ export class BoardPort {
       try { this.reader?.releaseLock(); } catch { /* already released */ }
       this.reader = null;
       this.open = false;
+      /* A device that left the bus takes the writable stream with it, and a
+         writer still bound to it would reject every later send with an error
+         about a stream rather than about a board. */
+      if (!this._stopping) this._writer = null;
       /* A close that was asked for is not news. A close the device initiated
          is: that is a board that reset or a cable that moved, and it should be
          visible where it happened rather than three steps later when a write
@@ -213,20 +219,61 @@ export class BoardPort {
    */
   send(obj) {
     const attempt = this._writing.then(async () => {
-      if (!this.port.writable) return false;
-      const writer = this.port.writable.getWriter();
-      try {
-        const { encodeFrame } = await import('./protocol.js');
-        await writer.write(encoder.encode(encodeFrame(obj)));
-        return true;
-      } finally {
-        writer.releaseLock();
-      }
+      const writer = this._getWriter();
+      if (!writer) return false;
+
+      /* Ready BEFORE, so the queue has room, and ready AGAIN after the write,
+         so the bytes have actually left. write() alone resolves when the chunk
+         is accepted into the queue — not when it reaches the device — and a
+         caller that treats that as delivery reports a send the board never
+         saw. See the note on _getWriter. */
+      await writer.ready;
+      await writer.write(encoder.encode(encodeFrame(obj)));
+      await writer.ready;
+      return true;
     });
     /* The chain must not break on a failed write, or every later send is
        rejected by a promise nobody is holding any more. */
     this._writing = attempt.then(() => {}, () => {});
     return attempt;
+  }
+
+  /**
+   * One writer, held for the life of the port.
+   *
+   * ----------------------------------------------------------------------------
+   * RELEASING THE LOCK AFTER EVERY WRITE LOSES THE WRITE
+   *
+   * The obvious shape — getWriter(), write(), releaseLock() in a finally — is
+   * what both this project and its predecessor did, and it silently drops
+   * data. `write()` resolves once the chunk is accepted into the stream's
+   * queue; the bytes have not necessarily reached the device. Releasing the
+   * lock at that moment tears down the writer with the queue still draining,
+   * and what was queued goes nowhere.
+   *
+   * The symptom is brutal to diagnose because nothing fails: the promise
+   * resolves, the caller logs a successful send, and the board reports it has
+   * received nothing at all. That is exactly what `rx: 0` was — the page had
+   * sent three frames and the board had seen none of them, with no error
+   * anywhere. The predecessor project recorded its provisioning as having
+   * "failed for a different environmental reason" every single time.
+   *
+   * So the writer is acquired once and kept. stop() drains it and lets it go,
+   * which it must: port.close() rejects while writable is still locked.
+   */
+  _getWriter() {
+    if (this._writer) return this._writer;
+    if (!this.port.writable) return null;
+    this._writer = this.port.writable.getWriter();
+    return this._writer;
+  }
+
+  /** Drain and release the writer, so the port can close. */
+  async _dropWriter() {
+    if (!this._writer) return;
+    try { await this._writer.ready; } catch { /* already errored */ }
+    try { this._writer.releaseLock(); } catch { /* already released */ }
+    this._writer = null;
   }
 
   /**
@@ -239,6 +286,10 @@ export class BoardPort {
   async stop() {
     this.open = false;
     this._stopping = true;
+
+    /* The writer goes first: port.close() rejects while writable is locked,
+       and a half-sent frame is better finished than abandoned. */
+    await this._dropWriter();
 
     try { await this.reader?.cancel(); } catch { /* already gone */ }
     /* Wait for the read loop to finish and drop its lock. close() rejects

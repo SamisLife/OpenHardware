@@ -81,14 +81,26 @@ CASES = """
 """
 
 GENERATOR = """
-import { encodeFrame, crc16 } from %s;
+import { encodeFrame, crc16, decodeLine } from %s;
 const cases = JSON.parse(%s);
+const written = JSON.parse(%s);
 console.log(JSON.stringify({
   frames: cases.map(c => ({ obj: c, line: encodeFrame(c).replace(/\\n$/, '') })),
   malformed: (() => { const b = '{"t":"ping",}';
     return `#OHW1 ${b} *${crc16(b).toString(16).toUpperCase().padStart(4, '0')}`; })(),
+  // What the monitor writes, read back by the specification's own decoder.
+  readBack: written.map(line => decodeLine(line.replace(/\\n$/, ''))),
 }));
 """
+
+# What --prov puts on the wire. A passphrase with a quote and a non-ASCII SSID
+# because both are legal and both have broken framing before.
+OUTBOUND = [
+    {'t': 'prov', 'ssid': 'bench-2g', 'psk': 'hunter2'},
+    {'t': 'prov', 'ssid': 'café wifi', 'psk': 'a "quoted" \\ pass'},
+    {'t': 'prov', 'ssid': 'open-net', 'psk': ''},
+    {'t': 'ping'},
+]
 
 
 def vectors():
@@ -102,7 +114,9 @@ def vectors():
     that this check exists to exercise would arrive as a question mark and the
     two implementations would be compared on a payload neither would ever see.
     """
-    script = GENERATOR % (json.dumps(PROTOCOL_JS.as_uri()), json.dumps(CASES))
+    written = [monitor.encode_frame(o).decode('utf-8') for o in OUTBOUND]
+    script = GENERATOR % (json.dumps(PROTOCOL_JS.as_uri()), json.dumps(CASES),
+                          json.dumps(json.dumps(written)))
     try:
         out = subprocess.run(
             [_node(), '--input-type=module', '-e', script],
@@ -153,6 +167,14 @@ def check_against_spec():
     # every boot.
     frame, reason = monitor.decode_line('I (312) harness: openhardware 0.11.0')
     ok('log output is neither a frame nor an error', frame is None and reason is None, reason)
+
+    # The other direction. A frame this tool writes has to be one the board
+    # will accept, and the specification's decoder is the closest thing to the
+    # board that can be run here. Checking it against this file's own decoder
+    # would only prove the two halves of one implementation agree.
+    for sent, got in zip(OUTBOUND, v['readBack']):
+        ok('the specification reads back a %s frame this tool wrote' % sent['t'],
+           got.get('frame') == sent, got)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +330,34 @@ def check_beats_without_a_boot_id():
     ok('it does not claim one boot it never saw', not rec.said('One boot, uptime never'))
 
 
+def check_foreign_protocol():
+    """
+    The same hardware runs the predecessor project's firmware, and it frames
+    with a different sentinel. Reporting that as silence sends somebody to
+    debug a board that is working perfectly.
+    """
+    w, rec, _ = watch()
+
+    w.text('#HWL1 {"t":"hello","fw":"harness-1.1.0","rx":57} *F477', None)
+    w.text('I (2915) hw_proto: first inbound bytes on USB', None)
+    w.text('#HWL1 {"t":"beat","uptime_s":2.45} *5218', None)
+    w.summary()
+
+    ok('a foreign sentinel is named the first time it is seen',
+       rec.said('speaks #HWL1'))
+    ok('and only the first time', len([1 for _, t in rec.lines if 'speaks #HWL1' in t]) == 1)
+    ok('the summary says the board is running other firmware',
+       rec.said('running other firmware'))
+    ok('and does not report it as a board that said nothing',
+       not rec.said('No beats arrived at all'))
+    ok('it states the board is fine, because that is what was observed',
+       rec.said('The board is fine'))
+
+    # Plain log output is still plain log output.
+    ok('ordinary log lines are not mistaken for a foreign protocol',
+       len(w.foreign) == 1 and w.foreign.get('HWL1') == 2, w.foreign)
+
+
 def check_says_nothing_it_did_not_see():
     """Absence is drawn, not hidden — the rule the rest of the project follows."""
     w, rec, _ = watch()
@@ -328,6 +378,7 @@ check_reboot_without_hello()
 check_stall()
 check_attached_mid_session()
 check_beats_without_a_boot_id()
+check_foreign_protocol()
 check_says_nothing_it_did_not_see()
 
 print('\n  %d passed, %d failed%s\n'

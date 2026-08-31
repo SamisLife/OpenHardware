@@ -451,6 +451,12 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   ok('by what it reported about itself',
      /Simulated board/.test(s.state.rungs.identify.detail), s.state.rungs.identify.detail);
 
+  /* Adopting a board reaches the same network fork a freshly written one does.
+     The question is about the board, not about how it got here. */
+  ok('a board adopted rather than written is still asked about a network',
+     s.state.rungs.network.state === 'ask', s.state.rungs.network.state);
+  await s.skipNetwork();
+
   await wait(400);
   ok('and telemetry follows', s.state.rungs.telemetry.state === 'done');
   ok('which ends bring-up', s.state.phase === 'done');

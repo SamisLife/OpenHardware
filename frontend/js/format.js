@@ -48,6 +48,32 @@ export function clock(t) {
 }
 
 /** Relative age, for frame staleness. */
+/**
+ * A span of time, at the precision that span deserves.
+ *
+ * Build steps run from tens of milliseconds to minutes, and one format across
+ * that range is unreadable at one end or the other. Three bands rather than a
+ * single unit, so a 40 ms step and a 4 minute one are both legible.
+ */
+export function dur(ms) {
+  if (!Number.isFinite(ms)) return NIL;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}m ${String(Math.round((ms % 60000) / 1000)).padStart(2, '0')}s`;
+}
+
+/**
+ * An identifier, shortened for a column that has no room for it.
+ *
+ * Truncated with an ellipsis rather than wrapped, because these sit in fixed
+ * cells beside measurements and a wrapping key pushes the number it labels out
+ * of alignment with the ones above it.
+ */
+export function shortKey(k) {
+  return typeof k === 'string' && k.length > 10 ? `${k.slice(0, 10)}…` : (k || NIL);
+}
+
 export function ago(t, now = Date.now()) {
   if (!Number.isFinite(t) || t <= 0) return NIL;
   const s = (now - t) / 1000;

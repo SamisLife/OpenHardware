@@ -157,10 +157,15 @@ function listen(scene = '') {
      && S.state.telemetry.limits.heapTotal === 327680,
      JSON.stringify(S.state.telemetry.limits));
 
-  /* A cable-tethered board has no association, and reporting a plausible
-     signal strength would be inventing one. */
-  ok('no signal strength is invented for a board with no radio',
-     S.state.telemetry.latest.rssi === 0);
+  /* Absent, not zero — and the difference is the whole rule. Zero dBm is an
+     extraordinarily strong signal and sits inside the plausible range, so a
+     panel handed it draws a full meter for a board with no radio associated.
+     The firmware omits the field; a simulator that sent zero would be held to
+     a weaker contract than the thing it stands in for, and would keep passing
+     after the real path had broken. */
+  ok('no signal strength is reported for a board with no radio',
+     S.state.telemetry.latest.rssi === null,
+     `rssi came through as ${JSON.stringify(S.state.telemetry.latest.rssi)}`);
 
   await wait(1700);
   ok('what is attached is discovered, not assumed',

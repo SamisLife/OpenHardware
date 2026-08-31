@@ -151,7 +151,26 @@ export const state = {
     streaming: false,
     /** set once the operator has answered the camera prompt either way */
     cameraAsked: false,
+    /** whether the board accepts a runtime `cfg` command, per its caps */
+    cfg: false,
+    /** { size, quality } the board reports it is running, or null */
+    config: null,
+    /** what the board said the last time it refused a cfg, or null */
+    cfgError: null,
   },
+
+  /* ---- devices/{id}/memory/procedural ------------------------------------
+     Limits recorded directly, by an agent through record_limit. The loop's
+     own learnings live on the attempts that established them; both are read
+     together, so there is one list and no second copy to drift. */
+  /** { key, value, note, source, committed, at } */
+  memory: [],
+
+  /* ---- a gate an agent's tool is waiting on -----------------------------
+     The loop's gate lives on the attempt that raised it. A tool's gate has no
+     attempt, so it lives here, drawn with the same block and answered by the
+     same buttons. Null when nothing is waiting. */
+  gate: null,
 
   /* ---- devices/{id}/firmware -------------------------------------------- */
   /** newest first. { version, sha, builtAt, bytes, slot, outcome, note } */
@@ -174,6 +193,14 @@ export const state = {
     source: null,
     /** short status line: what the page would otherwise not be saying */
     label: '',
+    /**
+     * An agent, inferred from its calls. There is no presence event in the
+     * standard, so the first call is the first evidence of one, `tool` is what
+     * it is doing right now, and `quiet` is silence for long enough. `available`
+     * is whether the browser offers document.modelContext at all — null until
+     * the page has looked.
+     */
+    agent: { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false },
   },
 };
 
@@ -231,7 +258,48 @@ function flush() {
 /** Force a full render. Used once at startup and on resize. */
 export function renderAll() {
   touch('device', 'telemetry', 'frame', 'peripherals', 'firmware',
-        'workOrder', 'attempts', 'ui');
+        'workOrder', 'attempts', 'memory', 'gate', 'ui');
+}
+
+/**
+ * Resolve once the model satisfies `pred`, with false on timeout.
+ *
+ * The read-side counterpart of the apply* writers: a tool waiting for a frame
+ * to arrive or a config to be confirmed waits on the model, not on the wire,
+ * so it sees exactly what the panels see and nothing the panels do not.
+ * Rejects with an AbortError when `signal` fires, because a caller that was
+ * cancelled must not be handed a false that looks like a timeout.
+ */
+export function waitForState(pred, { timeoutMs = 10000, signal = null } = {}) {
+  return new Promise((resolve, reject) => {
+    let unsubscribe = null;
+    let timer = 0;
+
+    const done = (value, err) => {
+      unsubscribe?.();
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+      if (err) reject(err); else resolve(value);
+    };
+    const onAbort = () => {
+      const e = new Error('aborted');
+      e.name = 'AbortError';
+      done(null, e);
+    };
+
+    if (signal?.aborted) return onAbort();
+    let first = false;
+    try { first = !!pred(state); } catch { first = false; }
+    if (first) return resolve(true);
+
+    signal?.addEventListener?.('abort', onAbort);
+    unsubscribe = subscribe(s => {
+      let hit = false;
+      try { hit = !!pred(s); } catch { hit = false; }
+      if (hit) done(true);
+    });
+    timer = setTimeout(() => done(false), timeoutMs);
+  });
 }
 
 /** Flush any pending notification immediately. Tests and teardown only. */
@@ -395,6 +463,26 @@ function mergeSteps(prev, incoming) {
 export function applyUi(patch) {
   Object.assign(state.ui, patch);
   touch('ui');
+}
+
+/** What the page has inferred about an agent. Merged, so a tool ending does
+    not forget that one was ever seen. */
+export function applyAgent(patch) {
+  Object.assign(state.ui.agent, patch);
+  touch('ui');
+}
+
+/** devices/{id}/memory/procedural — one more limit, recorded directly. */
+export function pushLimit(fact) {
+  if (!fact || !fact.key) return;
+  state.memory.push({ ...fact });
+  touch('memory');
+}
+
+/** The gate a tool is waiting on, or null to clear it. */
+export function applyGate(doc) {
+  state.gate = doc ? { ...doc } : null;
+  touch('gate');
 }
 
 /* ------------------------------------------------------------------------ */

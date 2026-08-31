@@ -1,13 +1,23 @@
 /* ============================================================================
    session.js — bringing a board up, one rung at a time.
    ----------------------------------------------------------------------------
-   Five rungs, in the order the hardware actually does them:
+   Six rungs, in the order the hardware actually does them:
 
        CONNECT     a port, granted and open
        FLASH       fetch, verify, write — the one stage with honest progress
        BOOT        the board resets, leaves the bus, and comes back
        IDENTIFY    something on the other end that answers
+       NETWORK     optional, offered once, and skippable without consequence
        TELEMETRY   and keeps answering
+
+   NETWORK is the only rung nothing depends on. Telemetry runs over the cable
+   whether or not a board has ever seen a network, so declining is a complete
+   answer rather than a deferral, and the rung says `skipped` rather than
+   failing. It is a rung at all — rather than a control off to one side —
+   because a network decides whether the board can be reached once the cable is
+   gone, and the predecessor project found that a setting reachable from
+   several states is both easy to trigger by accident and easy to leave half
+   configured.
 
    FLASH always stops and asks, and it asks having already looked. It listens
    first, so the question it puts is a specific one: this board is running
@@ -42,16 +52,33 @@
    ========================================================================== */
 
 import { fault } from './faults.js';
+import { pushGap, applyDevice, applyPeripherals } from '../state.js';
 
-export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'telemetry'];
+export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'network', 'telemetry'];
 
 const RUNG_TITLE = {
   connect: 'Connect',
   flash: 'Flash',
   boot: 'Boot',
   identify: 'Identify',
+  network: 'Network',
   telemetry: 'Telemetry',
 };
+
+/**
+ * How long to wait for the board to confirm it stored what it was sent, and
+ * how many times to send it.
+ *
+ * Sending and assuming was not enough in the predecessor project: a `prov`
+ * frame that never arrived produced a page reporting success while the board
+ * carried on with credentials from a previous network. The line is shared with
+ * logs, telemetry and image chunks, so one lost frame is an ordinary event
+ * worth retrying rather than a failure worth reporting.
+ */
+const PROV_ACK_MS = 1600;
+const PROV_TRIES = 3;
+/** And how long to watch the join itself before saying what happened. */
+const JOIN_MS = 20000;
 
 /** How long to wait for a board to announce itself before giving up on it. */
 const HELLO_MS = 4000;
@@ -76,7 +103,10 @@ export class Session {
     this.frameSink = null;
     this.monitor = [];
     this._helloWaiters = new Set();
+    this._matchWaiters = new Set();
     this._beatTimer = 0;
+    this._relinkArmed = false;
+    this._relinking = false;
     this.reset();
   }
 
@@ -104,6 +134,13 @@ export class Session {
       hello: null,
       /** What was heard on the wire before anything identified itself. */
       heard: { lines: 0, first: null },
+      /**
+       * The last network status the board reported, or null.
+       *
+       * { state, ssid, ip, detail, retryMs } — whatever it has actually said,
+       * never assembled from what it was asked to do.
+       */
+      net: null,
       /**
        * How the running firmware compares to what is published, once both are
        * known. Null while unknown, and null is the ordinary state — there may
@@ -212,6 +249,7 @@ export class Session {
     this.state.found = null;
     this.state.writing = false;
     this.state.hello = null;
+    this.state.net = null;
     this._justWritten = false;
 
     this.state.phase = 'working';
@@ -402,6 +440,8 @@ export class Session {
         onClose: () => {
           this.log('the board closed the link', 'error');
           this._helloWaiters.forEach(fn => fn(null));
+          this._matchWaiters.forEach(w => w.finish(null));
+          void this.onLinkClosed();
         },
       });
       return !!this.link?.open;
@@ -588,7 +628,153 @@ export class Session {
        is worth knowing and worth nobody waiting on. */
     this.loadPublished(hello).then(() => this.emit());
 
+    return this.askNetwork(hello);
+  }
+
+  /* ---- 4. NETWORK, which is optional and says so ----------------------- */
+
+  /**
+   * Offer to put the board on a network, once, where the answer first matters.
+   *
+   * An explicit fork rather than a control off to one side. A network is a
+   * real decision with a real consequence — it is what lets the board be
+   * reached once the cable is gone — and the predecessor project learned that
+   * a button reachable from several states is both easy to trigger by accident
+   * and easy to leave half-configured.
+   *
+   * Skipped silently for a board that is already online, because there is
+   * nothing to decide: asking somebody to confirm a thing that is already true
+   * is how a flow teaches people to click past it.
+   *
+   * Telemetry runs over the cable either way. Nothing below this rung depends
+   * on it, which is why declining is a first-class answer rather than a
+   * consolation.
+   */
+  askNetwork(hello) {
+    if (hello?.net === 'online') {
+      this.state.net = { state: 'online', ssid: hello.ssid || '', ip: hello.ip || null };
+      this.rung('network', 'done',
+        [hello.ssid, hello.ip].filter(Boolean).join(' · ') || 'online');
+      return this.watchTelemetry();
+    }
+
+    this.state.net = hello?.net ? { state: hello.net, ssid: hello.ssid || '' } : null;
+    this.rung('network', 'ask', hello?.provisioned
+      ? `stored ${hello.ssid || 'a network'}, not associated`
+      : 'no network stored');
+    this.state.phase = 'decide';
+    this.emit();
+    return null;
+  }
+
+  /** Carry on over the cable. A complete answer, not a deferral. */
+  skipNetwork() {
+    this.rung('network', 'skipped', 'reporting over the cable');
+    this.state.phase = 'working';
+    this.emit();
     return this.watchTelemetry();
+  }
+
+  /**
+   * Hand the board credentials, then watch what it does with them.
+   *
+   * Sent and confirmed rather than sent and assumed. The board acknowledges
+   * every `prov`, so there is no reason to guess — and the acknowledgement
+   * quotes what it re-read out of flash, so a write that silently failed
+   * cannot come back looking like a success.
+   */
+  async provision(ssid, psk = '') {
+    const name = String(ssid || '').trim();
+    if (!name) return this.fail('network', 'no_ssid');
+
+    this.state.fault = null;
+    this.state.phase = 'working';
+    this.rung('network', 'active', `sending credentials for "${name}"`);
+
+    const payload = { t: 'prov', ssid: name, psk: psk || '' };
+    /* The passphrase is starred in the log rather than omitted, so the record
+       shows that one was sent and how long it was, without carrying it. */
+    const shown = `> prov {ssid:"${name}", psk:"${'*'.repeat((psk || '').length)}"}`;
+
+    let ack = null;
+    for (let attempt = 1; attempt <= PROV_TRIES && !ack; attempt++) {
+      /* Armed BEFORE the frame goes out, not after.
+       *
+       * The reply can arrive before the send call has even returned — the
+       * simulated board answers synchronously, and a real one on a short cable
+       * is not much slower than the promise machinery here. A listener
+       * attached afterwards has already missed it, and what that produces is
+       * three resends of credentials the board stored correctly the first
+       * time, followed by a fault reporting that nothing was stored. */
+      const reply = this.awaitFrame('prov_ack', PROV_ACK_MS);
+
+      try {
+        if (!(await this.link?.send(payload))) {
+          return this.fail('network', 'link_dropped', 'the port would not accept the write');
+        }
+      } catch (err) {
+        return this.fail('network', 'link_dropped', err.message);
+      }
+
+      this.log(attempt === 1 ? shown : `${shown}  (resend ${attempt}/${PROV_TRIES})`, 'frame');
+      this.rung('network', 'active', 'waiting for the board to confirm');
+      ack = await reply;
+    }
+
+    if (!ack) {
+      /* Every identity frame carries how many bytes the board has ever
+         received. Still zero after three sends means nothing this page
+         transmits is arriving at all — which is a fault in the link, not in
+         the credentials, and sends somebody somewhere completely different. */
+      const deaf = Number(this.state.hello?.rx) === 0;
+      return this.fail('network', deaf ? 'nothing_arrives' : 'no_prov_ack');
+    }
+
+    if (ack.ok === false) {
+      return this.fail('network', 'prov_refused', ack.err || 'the board refused it');
+    }
+
+    /* What the board read back, not what it was sent. */
+    this.log(`< prov_ack ssid:"${ack.ssid}"`
+           + `${ack.has_psk ? ' with a passphrase' : ' (open network)'}`, 'frame');
+
+    return this.watchJoin(name);
+  }
+
+  /**
+   * Wait for the board to say it associated, or say why it has not.
+   *
+   * A failure here is not a fault in the flow. The firmware backs off and
+   * keeps trying forever, so what this reports is the state at the moment of
+   * asking, with the reason the board gave — and the board is still going.
+   */
+  async watchJoin(ssid) {
+    this.rung('network', 'active', `joining ${ssid}`);
+
+    const status = await this.awaitStatus(['wifi_ok', 'wifi_fail'], JOIN_MS);
+
+    if (status?.stage === 'wifi_ok') {
+      this.state.net = { state: 'online', ssid, ip: status.ip || null };
+      this.rung('network', 'done', [ssid, status.ip].filter(Boolean).join(' · '));
+      this.state.phase = 'working';
+      this.emit();
+      return this.watchTelemetry();
+    }
+
+    this.state.net = {
+      state: 'retrying', ssid,
+      detail: status?.detail || null,
+      retryMs: Number(status?.retry_ms) || null,
+    };
+    /* The observation is the board's own sentence when it gave one. Inventing
+       a cause for a silent join would be exactly the thing this page refuses
+       to do everywhere else. */
+    this.state.fault = fault(status ? 'wifi_failed' : 'wifi_silent',
+                             status?.detail || null);
+    this.state.phase = 'fault';
+    this.rung('network', 'fault', status?.detail || 'no answer from the board');
+    this.emit();
+    return null;
   }
 
 
@@ -605,6 +791,38 @@ export class Session {
       const timer = setTimeout(() => finish(null), timeoutMs);
       this._helloWaiters.add(finish);
     });
+  }
+
+  /**
+   * The same wait, for any frame matching a predicate.
+   *
+   * Separate from awaitHello because identity is the one frame the whole flow
+   * turns on and it has its own fan-out; this is for the one-off replies —
+   * an acknowledgement, a join result — where a timeout means "it did not
+   * come" rather than "the board is gone".
+   */
+  awaitMatch(matches, timeoutMs) {
+    return new Promise(resolve => {
+      let done = false;
+      const finish = v => {
+        if (done) return;
+        done = true;
+        this._matchWaiters.delete(entry);
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const entry = { matches, finish };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      this._matchWaiters.add(entry);
+    });
+  }
+
+  awaitFrame(type, timeoutMs) {
+    return this.awaitMatch(f => f.t === type, timeoutMs);
+  }
+
+  awaitStatus(stages, timeoutMs) {
+    return this.awaitMatch(f => f.t === 'status' && stages.includes(f.stage), timeoutMs);
   }
 
   /* ---- 4. TELEMETRY ---------------------------------------------------- */
@@ -645,7 +863,162 @@ export class Session {
     this.log('telemetry is live', 'meta');
     this.state.phase = 'done';
     this.state.active = null;
+    this.armRelink();
     this.emit();
+  }
+
+  /* ---- surviving the cable ---------------------------------------------- */
+
+  /**
+   * Watch for the board coming back, without ever going looking for it.
+   *
+   * Chrome fires `connect` for any device this page already has permission
+   * for, with no user gesture. That is the whole reason a silent reconnect is
+   * possible at all: requestPort() needs a click, and the point of this is to
+   * survive somebody walking away.
+   *
+   * Event-driven rather than polled. While the board is unplugged this costs
+   * nothing, and no port is ever opened speculatively — so no board is ever
+   * reset just to find out whether it is there.
+   */
+  armRelink() {
+    /* A simulated board has no bus to reappear on, and a real board plugged in
+       during ?sim must not be adopted by a simulated session. */
+    if (this._relinkArmed || this.driver.simulated) return;
+    if (typeof navigator === 'undefined' || !navigator.serial) return;
+    this._relinkArmed = true;
+
+    this._onSerialConnect = () => { void this.relink('a board appeared on the bus'); };
+    navigator.serial.addEventListener('connect', this._onSerialConnect);
+
+    /* Returning to the tab is the other moment worth trying, because a
+       backgrounded tab deliberately declines the port. See relink(). */
+    this._onVisible = () => {
+      if (!globalThis.document?.hidden) {
+        void this.relink('the tab came back to the foreground');
+      }
+    };
+    globalThis.document?.addEventListener('visibilitychange', this._onVisible);
+
+    /* Leaving for good. A serial port is exclusive across the whole machine,
+       so a document that goes away still holding one denies it to every other
+       tab and every other program, and the next thing to want it is told
+       access was denied with nothing on screen to explain why. */
+    this._onPageHide = () => { void this.closeLink(); };
+    globalThis.addEventListener?.('pagehide', this._onPageHide);
+  }
+
+  disarmRelink() {
+    if (this._onSerialConnect) {
+      globalThis.navigator?.serial?.removeEventListener('connect', this._onSerialConnect);
+      this._onSerialConnect = null;
+    }
+    if (this._onVisible) {
+      globalThis.document?.removeEventListener('visibilitychange', this._onVisible);
+      this._onVisible = null;
+    }
+    if (this._onPageHide) {
+      globalThis.removeEventListener?.('pagehide', this._onPageHide);
+      this._onPageHide = null;
+    }
+    this._relinkArmed = false;
+  }
+
+  /**
+   * The device closed the port.
+   *
+   * Recorded immediately rather than left to the silence watchdog, which would
+   * take another 1.5 s to reach the same conclusion. A console showing live
+   * numbers for a board that has left the bus is the single thing this
+   * instrument exists to prevent.
+   */
+  async onLinkClosed() {
+    if (!this._relinkArmed || this.state.phase !== 'done') return;
+    pushGap(Date.now(), 'PORT CLOSED');
+    applyDevice({ link: 'lost' });
+    await this.relink('the port closed');
+  }
+
+  /**
+   * Get the cable back, without disturbing the board.
+   *
+   * Bounded on purpose. If the board is not there, stop and wait to be told it
+   * is, because retrying forever would be a poll wearing an event's clothes.
+   */
+  async relink(why) {
+    if (this._relinking || this.disposed) return false;
+    /* Bring-up owns the port while it runs. This covers only the stretch after
+       handover. */
+    if (this.state.phase !== 'done') return false;
+    if (this.link?.open) return false;
+
+    /* A background tab does not get to take the board.
+     *
+     * The port is exclusive machine-wide, so a console left open in another
+     * tab would silently reclaim the device the moment it re-enumerates, and
+     * the tab actually being used would then fail to open it, with the board
+     * sitting right there on the bus and nothing saying who has it.
+     *
+     * Deferred rather than dropped: visibilitychange retries the moment this
+     * tab is looked at again. */
+    if (globalThis.document?.hidden) {
+      this.log('a board is back, but this tab is in the background - '
+             + 'leaving the port for whoever is in front', 'meta');
+      return false;
+    }
+
+    this._relinking = true;
+    try {
+      this.log(`reattaching to the board - ${why}`, 'meta');
+      await this.closeLink();
+
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        if (this.disposed) return false;
+        /* A board that has just enumerated may refuse an open for a moment.
+           Waited before the first try, not only between tries. */
+        await sleep(attempt === 1 ? 250 : 700);
+
+        for (const port of (await this.driver.portsLike?.(this.port)) ?? []) {
+          if (this.disposed) return false;
+          this.port = port;
+
+          if (!(await this.openLink())) continue;
+
+          this.link?.send({ t: 'ping' }).catch(() => {});
+          const hello = await this.awaitHello(4000);
+
+          /* Re-checked AFTER the await, not only before it. dispose() can land
+             while this is opening, and a link opened after that point belongs
+             to nobody: the session is gone, nothing will close it, and the next
+             session's Connect fails on a port this one is still holding. */
+          if (this.disposed) { await this.closeLink(); return false; }
+          if (!this.link?.open) { await this.closeLink(); continue; }
+
+          if (hello) this.state.hello = hello;
+
+          /* A board that has just booted is not streaming, and it has
+             rediscovered whatever is attached to it. What the previous boot
+             said is dropped and the question asked again, rather than carried
+             forward as though it were still current. */
+          applyPeripherals({ known: false, streaming: false, cameraAsked: false });
+          this.link.send({ t: 'caps' }).catch(() => {});
+
+          this.log('serial link re-established', 'meta');
+          this.rung('telemetry', 'done', 'reporting');
+          this.emit();
+          return true;
+        }
+      }
+
+      /* Nothing matched. Most often the board is simply not plugged in yet and
+         `connect` will call back. It can also mean it went into a socket this
+         page has no grant for, which needs a person. Both are named; neither
+         is asserted. */
+      this.log('no permitted serial port matches this board', 'meta');
+      return false;
+    } finally {
+      this._relinking = false;
+    }
   }
 
   /* ---- frames ---------------------------------------------------------- */
@@ -669,6 +1042,21 @@ export class Session {
     }
     if (frame.t === 'status') {
       this.log(`${frame.stage}${frame.detail ? ` · ${frame.detail}` : ''}`, 'meta');
+    }
+
+    /* The network state is read off what the board says, never assembled from
+       what it was asked to do. A board told to join and still retrying must
+       not read as online anywhere on this page. */
+    if (frame.t === 'beat' && typeof frame.net === 'string') {
+      if (this.state.net?.state !== frame.net) {
+        this.state.net = { ...(this.state.net || {}), state: frame.net };
+        this.emit();
+      }
+    }
+
+    /* Run over a copy: a waiter that resolves removes itself from the set. */
+    for (const w of [...this._matchWaiters]) {
+      if (w.matches(frame)) w.finish(frame);
     }
 
     this.frameSink?.(frame);
@@ -697,8 +1085,13 @@ export class Session {
    */
   async dispose() {
     clearTimeout(this._beatTimer);
+    /* Before anything else: a disposed session must not go on grabbing ports
+       out from under its successor when a board reappears. */
+    this.disarmRelink();
     this._helloWaiters.forEach(fn => fn(null));
     this._helloWaiters.clear();
+    this._matchWaiters.forEach(w => w.finish(null));
+    this._matchWaiters.clear();
     this.frameSink = null;
     this.onUpdate = null;
     await this.closeLink();

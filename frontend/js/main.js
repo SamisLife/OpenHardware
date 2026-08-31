@@ -20,7 +20,10 @@
    js/link/sim.js.
    ========================================================================== */
 
-import { state, subscribe, renderAll, applyPeripherals, applyUi } from './state.js';
+import {
+  state, subscribe, renderAll, applyPeripherals, applyUi,
+  applyWorkOrder, resetAttempts,
+} from './state.js';
 import { mountStrip } from './strip.js';
 import { mountRail, renderRail } from './render/rail.js';
 import { mountVitals, renderVitals } from './render/vitals.js';
@@ -29,6 +32,15 @@ import { mountPeripherals, renderPeripherals } from './render/peripherals.js';
 import {
   mountOnboard, renderOnboard, showOnboard, hideOnboard, resetWire, eraseChecked,
 } from './render/onboard.js';
+import { mountAgent, renderWorkOrder, renderAttempts, renderGate } from './render/agent.js';
+import { mountComposer, renderComposer } from './render/composer.js';
+import { mountFirmware, renderFirmware, renderMemory } from './render/firmware.js';
+import { startBuild } from './builder/run.js';
+import { parseObjective } from './builder/objective.js';
+import { approvePending, holdPending } from './builder/gate.js';
+import { mountTools, configEffector } from './webmcp.js';
+import { fetchManifest } from './link/flash.js';
+import { clock } from './format.js';
 import { Session } from './onboard/session.js';
 import { webSerialDriver, simulatedDriver } from './link/drivers.js';
 import { createFeed } from './link/feed.js';
@@ -44,6 +56,17 @@ mountVitals($('#vitals'));
 mountCamera($('#camera'));
 /** Set once a transport is attached; the camera offer writes through it. */
 let link = null;
+
+mountFirmware($('#firmware'));
+/* The two buttons answer whatever gate is pending — the loop's, before it
+   commits a limit, or a tool's, before it writes to the board. Approve and
+   Hold are never tools, which is the whole reason there is a gate. */
+mountAgent($('#agent'), {
+  onApprove: () => approvePending(),
+  onHold: () => { holdPending(); announce('Gate held. Nothing was written.'); },
+  onAbandon: () => abandonBuild(),
+});
+mountComposer($('#compose'), { onSubmit: goal => startWorkOrder(goal) });
 
 mountPeripherals($('#vitals'), {
   onCamera: on => setCamera(on),
@@ -63,11 +86,25 @@ async function setCamera(on) {
   catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
 }
 
+/**
+ * Apply a camera configuration at runtime and wait for the board to confirm.
+ *
+ * One implementation, handed to both the build loop and the agent's tools, so
+ * an attempt recorded by either was applied the same way and confirmed the
+ * same way — by what the board reported back, not by what was sent.
+ */
+const setConfig = configEffector(async obj => {
+  if (!link) return false;
+  return link.send(obj);
+});
+
 mountOnboard($('#onboard'), {
   onConnect: () => connect(),
   onFlash: () => session?.flash({ eraseAll: eraseChecked() }),
   onListen: () => session?.listen(),
   onContinue: () => session?.continueWithBoard(),
+  onProvision: (ssid, psk) => session?.provision(ssid, psk),
+  onSkipNetwork: () => session?.skipNetwork(),
   onRetry: () => retry(),
   /* The flag, not the rung. The flash rung is also active while it is reading
      what the board already has, and warning about that trains somebody to
@@ -95,6 +132,14 @@ subscribe((s, changed) => {
      nothing. */
   if (changed.has('frame') || changed.has('device') || changed.has('peripherals')) renderCamera(s);
   if (changed.has('peripherals')) { renderPeripherals(s); syncCameraPanel(s); }
+  if (changed.has('workOrder')) { renderWorkOrder(s); renderComposer(s); }
+  /* Attempts drive the learned-limits list too: what the board has been shown
+     to do is read off the attempts rather than stored separately, so there is
+     no second copy to fall out of step. */
+  if (changed.has('attempts')) { renderAttempts(s); renderMemory(s); }
+  if (changed.has('memory')) renderMemory(s);
+  if (changed.has('gate')) renderGate(s);
+  if (changed.has('firmware')) renderFirmware(s);
   if (changed.has('ui')) renderSource(s);
   narrate(s, changed);
 });
@@ -108,9 +153,26 @@ function renderSource(s) {
   const src = s.ui.source;
   badge.textContent = src ? String(src).toUpperCase() : 'NO SOURCE';
   /* Cyan only for a source with real hardware behind it. Anything synthetic
-     stays amber, so a demonstration can never be mistaken for a measurement. */
+     stays amber, so a demonstration can never be mistaken for a measurement.
+     An agent being present changes none of this: it is drawn in the note,
+     never in the colour, because a model calling tools against a simulated
+     board is still looking at a simulation. */
   badge.dataset.live = String(src === 'usb' || src === 'server');
-  note.textContent = s.ui.label || '';
+  note.textContent = [s.ui.label || '', presenceLine(s.ui.agent)].filter(Boolean).join(' · ');
+}
+
+/**
+ * What the page has inferred about an agent, in the voice of the link
+ * narration. There is no presence event to draw from, so this is the first
+ * call, the running tool, and silence — nothing the page did not observe.
+ */
+function presenceLine(a) {
+  if (!a) return '';
+  if (a.available === false) return 'WebMCP tools are available in a WebMCP-enabled browser.';
+  if (!a.seen) return '';
+  if (a.tool) return `Agent running ${a.tool}.`;
+  if (a.quiet) return `Agent quiet since ${clock(a.lastAt)}.`;
+  return 'Agent attached.';
 }
 
 /* ------------------------------------------------------------------------ */
@@ -190,16 +252,22 @@ function retry() {
   session?.connect({ reuse: code !== 'no_port' });
 }
 
-/** Hand the open link over to the instrument. */
-let handedOver = false;
+/**
+ * Hand the open link over to the instrument.
+ *
+ * Keyed on the link rather than on a once-only flag. A board written to by
+ * flash_image resets, comes back, and finishes bring-up a second time with a
+ * new link — and a flag that only ever let the first handover through would
+ * leave the instrument fed by a port that no longer exists.
+ */
 function goLive(s) {
-  if (handedOver) return;
-  handedOver = true;
+  if (link && link === s.link) return;
 
   hideOnboard();
   document.body.dataset.view = 'console';
   link = s.link;
 
+  feed?.stop();
   feed = createFeed({
     source: simulated ? 'sim' : 'usb',
     onLost: () => applyUi({ label: 'no telemetry' }),
@@ -211,6 +279,80 @@ function goLive(s) {
 
   applyUi({ label: simulated ? (scene ? `simulated · ${scene}` : 'simulated') : '' });
 }
+
+/* ------------------------------------------------------------------------ */
+/* the agent                                                                 */
+/* ------------------------------------------------------------------------ */
+
+/** The run currently working against the attached board, or null. */
+let build = null;
+
+/**
+ * Put the local loop to work against whatever is plugged in.
+ *
+ * Two effectors are handed over, and they are the same two the agent's tools
+ * use: `cam` turns capture on so a frame rate can be measured, and `cfg`
+ * applies a configuration at runtime on a board that accepts one. Every step
+ * the run narrates that it did not really perform is marked as such and drawn
+ * differently.
+ *
+ * The seam is WebMCP tools. An agent in the browser drives the board through
+ * run_experiment and the rest, writing to the same attempts this loop writes
+ * to; this loop is what advances the work order when no agent is calling.
+ * Nothing in builder/run.js changes shape either way.
+ *
+ * @returns {{ok: boolean, error?: string}} so a tool that submits a goal can
+ *          report a refusal rather than a silent no-op.
+ */
+function startWorkOrder(goal) {
+  const o = parseObjective(goal);
+  if (!o.ok) {
+    return { ok: false, error: 'the goal has nothing measurable in it — name a frame-rate '
+                              + 'floor, a temperature ceiling, a memory reserve, or something to maximise' };
+  }
+  build?.stop();
+  build = startBuild({
+    goal,
+    setCamera: on => setCamera(on),
+    setConfig,
+    onDone: () => announce('The work order finished.'),
+  });
+  announce('Work order submitted. The loop is working.');
+  return { ok: true };
+}
+
+function abandonBuild() {
+  build?.stop();
+  build = null;
+  applyWorkOrder(null);
+  resetAttempts();
+  announce('Work order abandoned.');
+}
+
+/* ------------------------------------------------------------------------ */
+/* the toolbelt                                                              */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Register the page's tools with the browser's agent, if it has one.
+ *
+ * The effectors are the page's own: the same link, the same session, the
+ * same loop. A tool does nothing the page could not already do from a
+ * button, and the two writes that matter go through the same gate the
+ * buttons answer. Absent document.modelContext, this registers nothing and
+ * the note beside the badge says so, once.
+ */
+mountTools({
+  fx: {
+    setCamera: on => setCamera(on),
+    setConfig,
+    flash: opts => session?.flash(opts),
+    provision: (ssid, psk) => session?.provision(ssid, psk),
+    submitWorkOrder: goal => startWorkOrder(goal),
+    manifest: () => fetchManifest(),
+    source: () => (simulated ? 'sim' : 'usb'),
+  },
+});
 
 /* ------------------------------------------------------------------------ */
 /* go                                                                        */

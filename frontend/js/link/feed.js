@@ -59,6 +59,12 @@ export function createFeed({ onLost = null, source = null } = {}) {
       case 'beat': return onBeat(frame);
       case 'caps': return onCaps(frame);
       case 'cam_ack': return applyPeripherals({ streaming: !!frame.on });
+      /* What the board confirmed it is running, or why it refused. Read out of
+         the ack rather than assumed from the request, so a config that never
+         took cannot show as applied. */
+      case 'cfg_ack': return frame.ok
+        ? applyPeripherals({ config: readConfig(frame), cfgError: null })
+        : applyPeripherals({ cfgError: String(frame.err || 'refused') });
       case 'img': return beginImage(frame);
       case 'imgd': return addChunk(frame);
       case 'status': return onStatus(frame);
@@ -171,6 +177,11 @@ export function createFeed({ onLost = null, source = null } = {}) {
       camera: cam,
       i2c: Array.isArray(frame.i2c) ? frame.i2c : [],
       streaming: !!frame.streaming,
+      /* Advertised, never assumed. A board that says nothing about cfg does
+         not support it, and a tool asking for a config it cannot apply is told
+         so rather than handed numbers from a size the board never ran. */
+      cfg: frame.cfg === true,
+      config: readConfig(frame.config),
     };
     /* A sensor that has just arrived is a new question for the operator, and
        the answer on file was about a different module. */
@@ -283,4 +294,11 @@ export function createFeed({ onLost = null, source = null } = {}) {
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** { size, quality } from a frame, or null when it carried no usable config. */
+function readConfig(c) {
+  if (!c || typeof c !== 'object' || typeof c.size !== 'string') return null;
+  const quality = Number(c.quality);
+  return { size: c.size, quality: Number.isFinite(quality) ? quality : null };
 }

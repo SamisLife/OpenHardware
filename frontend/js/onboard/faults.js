@@ -83,11 +83,14 @@ export const FAULTS = {
   no_manifest: {
     observed: 'The server published no firmware image, or one this page cannot use.',
     causes: [
-      'the firmware has not been built yet',
-      'the page is served by a plain file server with no build output behind it',
+      'the file server is rooted somewhere other than the repository, so the '
+      + 'page loads and only the firmware path is missing',
+      'the firmware has not been built and packaged yet',
     ],
-    next: 'Nothing was written to the board. Build the firmware, or connect to a '
-        + 'board that is already running instead.',
+    next: 'Nothing was written to the board. The exact URL that failed is in the '
+        + 'monitor beside this — if the page itself loaded, compare the two. '
+        + 'Serve the repository root, then build with tools/build.sh and publish '
+        + 'with tools/package.sh.',
   },
 
   fetch_failed: {
@@ -189,6 +192,85 @@ export const FAULTS = {
     next: 'Reload the page and connect again. To see what the board is doing '
         + 'meanwhile, close this page and run tools/monitor.py, which reads it '
         + 'with nothing else in the way.',
+  },
+
+  /* ---- the network rung -------------------------------------------------
+     Everything here is recoverable and none of it stops telemetry, which runs
+     over the cable regardless. The `next` lines say so, because a fault that
+     reads as terminal when it is not is its own kind of false report. */
+
+  no_ssid: {
+    observed: 'No network name was given.',
+    causes: ['the field was left empty'],
+    next: 'Type the name of a 2.4 GHz network, or skip — the board reports over '
+        + 'the cable either way.',
+  },
+
+  no_prov_ack: {
+    observed: 'The credentials were sent three times and the board never '
+            + 'confirmed storing them.',
+    causes: [
+      'the frames are not reaching the board',
+      'the board is running firmware that does not answer a prov frame',
+    ],
+    next: 'Nothing has been stored, so the board is unchanged. Telemetry over '
+        + 'the cable is unaffected — skip the network, or re-flash and try again.',
+  },
+
+  /* Split from no_prov_ack on an actual measurement rather than a guess: the
+     board reports how many bytes it has ever received, and zero after three
+     sends means the inbound half of the link is dead. That is a different
+     fault in a different place from a frame that arrived and was ignored. */
+  nothing_arrives: {
+    observed: 'The board reports that it has never received a single byte from '
+            + 'this page, after three attempts to send.',
+    causes: [
+      'the port is open for reading but writes are not reaching the board',
+      'something else holds the port and is absorbing the writes',
+    ],
+    next: 'Reload the page and connect again. The board itself is fine — it is '
+        + 'still reporting, which is how this was measured.',
+  },
+
+  prov_refused: {
+    observed: 'The board received the credentials and refused to store them.',
+    causes: [
+      'the name was empty or longer than the board can hold',
+      'the stored settings could not be written to flash',
+    ],
+    next: 'The board reported the reason beside this. Its previous settings are '
+        + 'unchanged.',
+  },
+
+  /* The board said why. That sentence is its observation, not this page's, and
+     it is passed through rather than paraphrased. */
+  wifi_failed: {
+    observed: 'The board stored the credentials and could not join the network.',
+    causes: [
+      'the passphrase was rejected',
+      'the network is 5 GHz only — this radio is 2.4 GHz',
+      'the access point is out of range',
+    ],
+    next: 'The board is still retrying, backing off as it goes, and it will join '
+        + 'on its own if the network appears. Telemetry over the cable is '
+        + 'unaffected.',
+  },
+
+  wifi_silent: {
+    observed: 'The board stored the credentials and then said nothing about '
+            + 'joining.',
+    causes: [
+      'the join is still in progress and is taking longer than the wait allowed',
+      'the firmware stored the network but never attempted it',
+    ],
+    next: 'The board keeps trying on its own. Watch the monitor beside this for '
+        + 'a wifi_ok or wifi_fail, or carry on over the cable.',
+  },
+
+  link_dropped: {
+    observed: 'The link to the board closed part-way through.',
+    causes: ['the cable moved', 'the board reset'],
+    next: 'Reconnect and try again.',
   },
 
   no_beat: {

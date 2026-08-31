@@ -184,9 +184,36 @@ function renderDecision(state) {
     <p class="decide__ask">${ask}</p>`;
 }
 
+/**
+ * The network fork.
+ *
+ * Written to make declining an obvious and complete answer. Telemetry runs
+ * over the cable whether or not the board ever sees a network, so a page that
+ * pressed for credentials here would be pressing for something nothing below
+ * it needs — and somebody who gave in would then be waiting on a join that
+ * bought them nothing.
+ */
+function renderNetworkDecision(state) {
+  const stored = state.hello?.ssid;
+  const provisioned = !!state.hello?.provisioned;
+
+  const found = provisioned
+    ? `This board has <strong>${esc(stored || 'a network')}</strong> stored and is
+       not associated with it.`
+    : 'This board has no network stored.';
+
+  el.lede.innerHTML = `
+    <p class="decide__found">${found}</p>
+    <p class="decide__ask">Telemetry runs over the cable either way — a network is
+      what lets the board be reached once the cable is gone. The radio is 2.4 GHz
+      only. Nothing below this step depends on the answer.</p>`;
+}
+
 function renderHead(state) {
   if (state.phase === 'fault' && state.fault) renderFault(state.fault);
-  else if (state.phase === 'decide') renderDecision(state);
+  else if (state.phase === 'decide' && state.rungs.network?.state === 'ask') {
+    renderNetworkDecision(state);
+  } else if (state.phase === 'decide') renderDecision(state);
   else el.lede.textContent = LEDE[state.phase] || '';
 
   const blocked = state.blocked;
@@ -264,6 +291,42 @@ function renderActions(state, blocked) {
      neither is a recovery: writing replaces what is there, and listening
      anyway is a legitimate choice for somebody who wants to watch a board they
      have no intention of overwriting. */
+  /* The network fork, which is a form rather than a pair of buttons. Skipping
+     is placed as an equal, not as a way out: nothing downstream needs a
+     network, so declining is an answer and not a failure to answer. */
+  if (state.phase === 'decide' && state.rungs.network?.state === 'ask') {
+    const form = document.createElement('form');
+    form.className = 'netform';
+    form.innerHTML = `
+      <label class="netform__field">Network name
+        <input type="text" data-ob="ssid" autocomplete="off" spellcheck="false"
+               placeholder="2.4 GHz network" value="${esc(state.hello?.ssid || '')}">
+      </label>
+      <label class="netform__field">Passphrase
+        <input type="password" data-ob="psk" autocomplete="off"
+               placeholder="leave empty for an open network">
+      </label>`;
+
+    form.addEventListener('submit', ev => {
+      ev.preventDefault();
+      const ssid = form.querySelector('[data-ob=ssid]')?.value || '';
+      const psk = form.querySelector('[data-ob=psk]')?.value || '';
+      handlers.onProvision?.(ssid, psk);
+    });
+    el.actions.appendChild(form);
+
+    add('button', 'Join this network', {
+      cls: 'btn btn--primary',
+      on: () => form.requestSubmit
+        ? form.requestSubmit()
+        : form.dispatchEvent(new Event('submit', { cancelable: true })),
+    });
+    add('button', 'Skip — use the cable', {
+      cls: 'btn', on: () => handlers.onSkipNetwork?.(),
+    });
+    return;
+  }
+
   if (state.phase === 'decide') {
     const version = state.published?.version;
     const write = version ? `Write ${version}` : 'Write firmware';

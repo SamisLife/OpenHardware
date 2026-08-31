@@ -166,6 +166,87 @@
       </div>
     </section>
 
+    <!-- ---- the agent ------------------------------------------------
+         Ported from the predecessor project, which had this working against a
+         simulated board. Every number it attributes to the hardware is read
+         from live telemetry; the steps it cannot really perform are marked and
+         rendered differently. See js/builder/run.js. -->
+    <section class="panel panel--agent" id="agent" aria-labelledby="agent-h">
+      <header class="panel__head">
+        <h2 class="panel__title" id="agent-h">Work order</h2>
+        <span class="panel__spacer"></span>
+        <span class="meta" data-agent="id">––</span>
+        <span class="meta" data-agent="opened">––</span>
+        <span class="tag" data-agent="status" data-status="idle">NO WORK ORDER</span>
+      </header>
+
+      <form class="compose" data-wo="form" id="compose">
+        <label class="compose__label" for="wo-input">
+          What should the agent make this board do?
+        </label>
+        <textarea id="wo-input" class="compose__input" rows="2" spellcheck="false"
+                  data-wo="input"
+                  placeholder="Run the camera at the highest resolution this board can sustain at 10 fps or better."></textarea>
+        <ul class="compose__read" data-wo="read"></ul>
+        <div class="compose__row">
+          <button class="btn btn--primary" type="submit" data-wo="submit" disabled>Start the agent</button>
+          <p class="compose__note" data-wo="note"></p>
+        </div>
+        <ul class="compose__examples" data-wo="examples"></ul>
+      </form>
+
+      <div class="order" data-agent="order" hidden>
+        <p class="order__goal" data-agent="goal"></p>
+        <ul class="order__constraints" data-agent="constraints"></ul>
+        <p class="order__rehearsal" data-agent="rehearsal" hidden></p>
+        <div class="order__row">
+          <button class="btn btn--ghost" type="button" data-agent="abandon">Abandon and rewrite</button>
+        </div>
+      </div>
+
+      <!-- A gate raised by a tool, not by an attempt. Same block, same buttons. -->
+      <div class="gate-slot" data-agent="gate" hidden></div>
+
+      <div class="log__head">
+        <span class="log__title">Build log</span>
+        <span class="meta" data-agent="count">––</span>
+      </div>
+
+      <div class="log" data-agent="attempts"></div>
+      <p class="empty" data-agent="empty">No attempts yet. The agent has nothing to do until a work order exists.</p>
+    </section>
+
+    <!-- ---- images and what has been learned -------------------------- -->
+    <section class="panel panel--firmware" id="firmware" aria-labelledby="fw-h">
+      <header class="panel__head">
+        <h2 class="panel__title" id="fw-h">Images</h2>
+        <span class="panel__sub">every build that reached the board</span>
+      </header>
+
+      <div class="fw__scroll">
+        <table class="fw">
+          <thead>
+            <tr>
+              <th scope="col">Version</th>
+              <th scope="col">SHA</th>
+              <th scope="col">Size</th>
+              <th scope="col">Built</th>
+              <th scope="col">Outcome</th>
+            </tr>
+          </thead>
+          <tbody data-fw="body"></tbody>
+        </table>
+        <p class="empty" data-fw="empty">No images yet.</p>
+      </div>
+
+      <div class="panel__divide">
+        <span>Procedural memory</span>
+        <em>learned limits, carried into future work orders</em>
+      </div>
+      <ul class="limits" data-fw="memory"></ul>
+      <p class="empty" data-fw="mem-empty">Nothing learned about this board yet.</p>
+    </section>
+
   </main>
 </div>
 

@@ -358,3 +358,52 @@ body[data-view="onboard"] .console {
 @media (prefers-reduced-motion: reduce) {
   .rung__bar i { transition: none; }
 }
+
+/* ---------------------------------------------------------------------------
+   The network form.
+
+   Laid out as part of the action row rather than as a modal, because it is one
+   of two equal answers to a question the flow is already asking. A dialog would
+   make declining feel like an escape from something.
+   ------------------------------------------------------------------------- */
+
+.netform {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.netform__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.netform__field input {
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink);
+  background: var(--panel-sunk, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 7px 9px;
+}
+
+.netform__field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* A placeholder is a hint, never a value. Dimmed hard so it cannot be mistaken
+   for something already filled in. */
+.netform__field input::placeholder {
+  color: var(--ink-faint, rgba(255, 255, 255, 0.28));
+}

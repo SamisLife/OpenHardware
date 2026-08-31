@@ -308,22 +308,51 @@ ul, ol { list-style: none; }
 
   .grid {
     min-height: 0;
-    grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-    grid-template-areas: "camera vitals";
+    grid-template-columns: minmax(330px, 1fr) minmax(400px, 1.2fr);
+    grid-template-rows: minmax(0, 1fr) auto minmax(150px, 0.5fr);
+    grid-template-areas:
+      "camera   agent"
+      "vitals   agent"
+      "firmware firmware";
   }
 
   /* No camera, no camera panel. Vitals — which carries the attached-hardware
-     list — takes the whole width rather than leaving a hole where an
+     list — takes the whole column rather than leaving a hole where an
      assumption used to be. */
   body[data-camera="off"] .grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "vitals";
+    grid-template-areas:
+      "vitals   agent"
+      "vitals   agent"
+      "firmware firmware";
   }
 
-  .panel--camera { grid-area: camera; }
+  /* Every panel is placed. A section with no grid-area is auto-placed into an
+     implicit row, which does not merely put it in the wrong spot — it pushes
+     the explicit template out of the way and collapses the whole instrument
+     into a single stacked column. Adding a panel means adding it here. */
+  .panel--camera   { grid-area: camera; }
   body[data-camera="off"] .panel--camera { display: none; }
-  .panel--vitals { grid-area: vitals; }
+  .panel--vitals   { grid-area: vitals; }
+  .panel--agent    { grid-area: agent; }
+  .panel--firmware { grid-area: firmware; }
 
   .panel { overflow: hidden; }
+}
+
+/* ---- ≥1440px: history gets a column of its own ------------------------- */
+
+@media (min-width: 1440px) {
+  .grid {
+    grid-template-columns: minmax(340px, 1fr) minmax(430px, 1.15fr) minmax(300px, 0.78fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "camera agent firmware"
+      "vitals agent firmware";
+  }
+
+  body[data-camera="off"] .grid {
+    grid-template-areas:
+      "vitals agent firmware"
+      "vitals agent firmware";
+  }
 }
