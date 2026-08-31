@@ -26,7 +26,9 @@ import { mountRail, renderRail } from './render/rail.js';
 import { mountVitals, renderVitals } from './render/vitals.js';
 import { mountCamera, renderCamera } from './render/camera.js';
 import { mountPeripherals, renderPeripherals } from './render/peripherals.js';
-import { mountOnboard, renderOnboard, showOnboard, hideOnboard, resetWire } from './render/onboard.js';
+import {
+  mountOnboard, renderOnboard, showOnboard, hideOnboard, resetWire, eraseChecked,
+} from './render/onboard.js';
 import { Session } from './onboard/session.js';
 import { webSerialDriver, simulatedDriver } from './link/drivers.js';
 import { createFeed } from './link/feed.js';
@@ -61,7 +63,12 @@ async function setCamera(on) {
   catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
 }
 
-mountOnboard($('#onboard'), { onConnect: () => connect(), onRetry: () => retry() });
+mountOnboard($('#onboard'), {
+  onConnect: () => connect(),
+  onFlash: () => session?.flash({ eraseAll: eraseChecked() }),
+  onRetry: () => retry(),
+  isWriting: () => session?.state.rungs.flash.state === 'active',
+});
 
 /* The recorder reads the telemetry slice through a function rather than
    importing the model, so it has no opinion about where state lives. */
@@ -164,6 +171,15 @@ async function connect() {
 function retry() {
   const code = session?.state.fault?.code;
   session.state.fault = null;
+
+  /* Retry what actually failed. A write that could not fetch its image should
+     not send somebody back through the port picker. */
+  if (code === 'no_manifest' || code === 'fetch_failed'
+      || code === 'no_chip' || code === 'flash_failed') {
+    return session?.flash({ eraseAll: eraseChecked() });
+  }
+  if (code === 'no_reopen') return session?.waitForBoot();
+
   /* A port already granted stays granted. Making somebody pick the same board
      out of a dialog again is friction with nothing behind it. */
   session?.connect({ reuse: code !== 'no_port' });

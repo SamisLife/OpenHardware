@@ -273,3 +273,40 @@ body[data-view="onboard"] .console {
 .wire__line[data-kind="meta"]  .wire__x { color: var(--c-ink-2); }
 .wire__line[data-kind="error"] .wire__x { color: var(--c-red); }
 .wire__line[data-kind="bad"]   .wire__x { color: var(--c-amber); }
+
+/* ---- measured progress -------------------------------------------------
+   The flash rung is the only place in this flow with a real number behind a
+   bar. Everything else is indeterminate and says so instead. */
+
+.rung__bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  margin-top: 6px;
+  background: var(--c-rule);
+  overflow: hidden;
+}
+.rung__bar[hidden] { display: none; }
+.rung__bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--c-amber);
+  transition: width 140ms linear;
+}
+
+.check {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--fs-micro);
+  color: var(--c-ink-3);
+  cursor: pointer;
+}
+.check em {
+  font-style: normal;
+  color: var(--c-ink-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rung__bar i { transition: none; }
+}

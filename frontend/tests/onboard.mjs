@@ -194,8 +194,15 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   await wait(400);
   ok('and telemetry follows', s.state.rungs.telemetry.state === 'done');
   ok('which ends bring-up', s.state.phase === 'done');
-  ok('with every rung accounted for',
-     RUNGS.every(r => s.state.rungs[r].state === 'done'));
+
+  /* Every rung is accounted for, and the two that did not run say `skipped`
+     rather than `done`. A board that was never written to must not leave a
+     ladder claiming firmware was written to it. */
+  ok('every rung is accounted for',
+     RUNGS.every(r => ['done', 'skipped'].includes(s.state.rungs[r].state)),
+     RUNGS.map(r => `${r}=${s.state.rungs[r].state}`).join(' '));
+  ok('and connecting to a running board does not claim to have written to it',
+     s.state.rungs.flash.state === 'skipped' && s.state.rungs.boot.state === 'skipped');
 
   /* The link stays open — it is the transport, not a setup channel. */
   ok('the link is still open after handover', s.link?.open === true);

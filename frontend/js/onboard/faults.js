@@ -80,6 +80,57 @@ export const FAULTS = {
         + 'the ROM bootloader, which does not reset on its own.',
   },
 
+  no_manifest: {
+    observed: 'The server published no firmware image, or one this page cannot use.',
+    causes: [
+      'the firmware has not been built yet',
+      'the page is served by a plain file server with no build output behind it',
+    ],
+    next: 'Nothing was written to the board. Build the firmware, or connect to a '
+        + 'board that is already running instead.',
+  },
+
+  fetch_failed: {
+    observed: 'An image could not be downloaded, or did not match its published hash.',
+    causes: [
+      'a truncated or interrupted download',
+      'a published hash that does not describe the file being served',
+    ],
+    /* Reachable only before the chip is opened, which is why this can be said
+       with certainty rather than hedged. */
+    next: 'Nothing was written to the board — it is exactly as it was.',
+  },
+
+  no_chip: {
+    observed: 'The port opened for the flasher and no chip answered on it.',
+    causes: [
+      'the board is running an application that refuses the automatic reset',
+      'the port belongs to something that is not a board',
+    ],
+    next: 'Put the board in download mode by hand — hold BOOT, tap RESET, release '
+        + 'BOOT — and try again.',
+  },
+
+  flash_failed: {
+    observed: 'The chip answered, and then the write did not finish.',
+    causes: [
+      'the cable moved',
+      'the board lost power partway through',
+    ],
+    next: 'Nothing is bricked: the ROM bootloader is in mask ROM and cannot be '
+        + 'overwritten. Unplug, plug back in, and write again.',
+  },
+
+  no_reopen: {
+    observed: 'The board was reset after writing and did not reappear on the bus.',
+    causes: [
+      'it re-enumerated as a device this page has no permission for',
+      'it did not restart',
+    ],
+    next: 'The image was written. Unplug the board, plug it back in, and connect '
+        + 'again.',
+  },
+
   no_hello: {
     observed: 'The port opened and stayed open, and nothing identifiable arrived.',
     causes: [

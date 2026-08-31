@@ -49,6 +49,16 @@ export function mountOnboard(root, opts = {}) {
     const gap = el.wire.scrollHeight - el.wire.scrollTop - el.wire.clientHeight;
     stuck = gap > 24;
   });
+
+  /* Writing cannot be made atomic, so the least this can do is warn. A board
+     is never bricked by an interrupted write — the ROM bootloader is in mask
+     ROM — but a half-written image will not boot, and somebody who closed the
+     tab deserves to know why. */
+  addEventListener('beforeunload', ev => {
+    if (!handlers.isWriting?.()) return;
+    ev.preventDefault();
+    ev.returnValue = '';
+  });
 }
 
 export function showOnboard() { if (el.root) el.root.hidden = false; }
@@ -77,6 +87,7 @@ function buildLadder(ids) {
       <span class="rung__dot" aria-hidden="true"></span>
       <span class="rung__title"></span>
       <span class="rung__detail"></span>
+      <div class="rung__bar" hidden><i></i></div>
     </li>`).join('');
 }
 
@@ -88,6 +99,17 @@ function renderLadder(state) {
     node.dataset.state = r.state;
     node.querySelector('.rung__title').textContent = r.title;
     node.querySelector('.rung__detail').textContent = r.detail || '';
+
+    /* The only measured progress in the whole flow. Everything else here is
+       genuinely indeterminate and says so rather than animating a bar that
+       means nothing. */
+    const bar = node.querySelector('.rung__bar');
+    const show = id === 'flash' && state.progress && r.state === 'active';
+    bar.hidden = !show;
+    if (show) {
+      const pct = (state.progress.written / state.progress.total) * 100;
+      bar.firstElementChild.style.width = `${pct.toFixed(1)}%`;
+    }
   }
 }
 
@@ -148,7 +170,7 @@ function renderFault(f) {
 function renderActions(state, blocked) {
   const sig = JSON.stringify([
     state.phase, state.hasPort, state.simulated, !!blocked,
-    state.fault ? state.fault.code : null,
+    state.fault ? state.fault.code : null, state.fault ? state.fault.raw : null,
   ]);
   if (sig === lastActionSig) return;
   lastActionSig = sig;
@@ -176,6 +198,22 @@ function renderActions(state, blocked) {
   add('button', state.hasPort ? 'Connect again' : 'Connect a board', {
     cls: 'btn btn--primary', on: () => handlers.onConnect?.(),
   });
+
+  /* Offered, never taken on the way past. Writing over a board that is already
+     running costs it whatever it was holding, so the label names what it does
+     and it does not get the primary weight. */
+  if (state.hasPort) {
+    add('button', 'Write firmware', { cls: 'btn', on: () => handlers.onFlash?.() });
+    const label = document.createElement('label');
+    label.className = 'check';
+    label.innerHTML = '<input type="checkbox" data-ob="erase"> Erase first'
+      + '<em>slower, and forgets anything the board had stored</em>';
+    el.actions.appendChild(label);
+  }
+}
+
+export function eraseChecked() {
+  return !!el.actions?.querySelector('[data-ob=erase]')?.checked;
 }
 
 function add(tag, text, { cls = '', on, disabled } = {}) {

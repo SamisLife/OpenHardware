@@ -1,11 +1,18 @@
 /* ============================================================================
    session.js — bringing a board up, one rung at a time.
    ----------------------------------------------------------------------------
-   Three rungs, in the order the hardware actually does them:
+   Five rungs, in the order the hardware actually does them:
 
        CONNECT     a port, granted and open
+       FLASH       fetch, verify, write — the one stage with honest progress
+       BOOT        the board resets, leaves the bus, and comes back
        IDENTIFY    something on the other end that answers
        TELEMETRY   and keeps answering
+
+   FLASH and BOOT are skipped for a board already running something that speaks
+   the protocol, which is the ordinary case once a board has been set up once.
+   Writing over a working board costs it whatever it was holding, so it is
+   never what happens by default.
 
    If bring-up stops, it stops on a named rung with a named observation. That
    is the whole design: "setup failed" is not something anybody can act on, but
@@ -16,20 +23,22 @@
    different path would prove nothing about this one.
 
    ----------------------------------------------------------------------------
-   WHAT IS DELIBERATELY NOT HERE
+   TWO PHASES AROUND THE WRITE
 
-   Nothing writes firmware. A board reached by this flow is one already running
-   something that speaks the protocol; flashing arrives with the tooling that
-   can produce an image to write. Until then the honest options are to use a
-   board that is already running, or to use the simulator.
+   Everything is fetched and verified before the chip is opened, and the two
+   halves have separate failures on purpose. Until the chip has answered, "the
+   write did not finish" is not a reachable outcome — so a missing image is
+   able to say the board was not touched, and mean it.
    ========================================================================== */
 
 import { fault } from './faults.js';
 
-export const RUNGS = ['connect', 'identify', 'telemetry'];
+export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'telemetry'];
 
 const RUNG_TITLE = {
   connect: 'Connect',
+  flash: 'Flash',
+  boot: 'Boot',
   identify: 'Identify',
   telemetry: 'Telemetry',
 };
@@ -68,6 +77,10 @@ export class Session {
         id: r, title: RUNG_TITLE[r], state: 'idle', detail: '', since: 0,
       }])),
       hasPort: false,
+      /** { written, total } while a write is running, else null. */
+      progress: null,
+      /** What the server published, once it has been asked for. */
+      manifest: null,
       /** The last identity frame seen, or null. */
       hello: null,
       /** What was heard on the wire before anything identified itself. */
@@ -190,6 +203,10 @@ export class Session {
     }
 
     this.rung('connect', 'done', 'port open');
+
+    /* A board already speaking the protocol needs nothing written to it. */
+    this.rung('flash', 'skipped', 'not written');
+    this.rung('boot', 'skipped', '');
     return this.identify();
   }
 
@@ -216,7 +233,105 @@ export class Session {
     }
   }
 
-  /* ---- 2. IDENTIFY ----------------------------------------------------- */
+  /* ---- 2. FLASH -------------------------------------------------------- */
+
+  /**
+   * Write firmware, then wait for the board to come back.
+   *
+   * Never reached by default. Writing over a board that is already running
+   * costs it whatever it was holding, so it is something asked for rather than
+   * something that happens on the way past.
+   */
+  async flash({ eraseAll = false } = {}) {
+    if (!this.port) return this.fail('connect', 'no_port');
+
+    this.state.fault = null;
+    this.state.phase = 'working';
+
+    /* Everything downstream is about to happen again, so it is put back to
+       waiting first. Without this a beat from the board being replaced arrives
+       mid-write, completes the telemetry rung for firmware that is on its way
+       out, and the board that comes back afterwards finds its own rung already
+       marked done. The flow has to be re-entrant because a retry re-enters it. */
+    clearTimeout(this._beatTimer);
+    this.rung('identify', 'idle', '');
+    this.rung('telemetry', 'idle', '');
+    this.state.hello = null;
+
+    /* ---- phase one: fetch. The board is not touched. ------------------- */
+    this.rung('flash', 'active', 'fetching the image');
+    let manifest, images;
+    try {
+      manifest = await this.driver.fetchManifest();
+      this.state.manifest = manifest;
+      images = await this.driver.fetchImages(manifest);
+    } catch (err) {
+      const code = err.code === 'no_server' ? 'no_manifest' : err.code || 'fetch_failed';
+      return this.fail('flash', code, err.message);
+    }
+
+    const kb = (manifest.total_bytes || 0) / 1024;
+    this.log(`${manifest.name || 'firmware'} ${manifest.version || ''} · `
+           + `${manifest.parts.length} images · ${kb.toFixed(0)} KB · hashes verified`, 'meta');
+
+    /* ---- phase two: write. From here the board is in play. ------------- */
+    await this.closeLink();
+
+    let chipAnswered = false;
+    this.rung('flash', 'active', 'connecting to the chip');
+    try {
+      await this.driver.flash(this.port, images, {
+        eraseAll,
+        onLog: line => this.log(String(line).replace(/\s+$/, ''), 'esptool'),
+        onChip: chip => {
+          chipAnswered = true;
+          this.log(`chip: ${chip}`, 'meta');
+          this.rung('flash', 'active', String(chip));
+        },
+        onProgress: (written, total) => {
+          this.state.progress = { written, total };
+          this.rung('flash', 'active',
+            `${(written / 1024).toFixed(0)} of ${(total / 1024).toFixed(0)} KB`);
+        },
+      });
+    } catch (err) {
+      this.state.progress = null;
+      /* Whether the chip ever answered is the fact that decides the message,
+         not a regex over the error text. */
+      return this.fail('flash', chipAnswered ? 'flash_failed' : 'no_chip', err.message);
+    }
+
+    this.state.progress = null;
+    this.rung('flash', 'done', `${manifest.version || 'image'} written`);
+    return this.waitForBoot();
+  }
+
+  /**
+   * The board has been reset by the flasher.
+   *
+   * On hardware with native USB the whole device leaves the bus and returns a
+   * second or two later, possibly as a different port object. This is the most
+   * fragile moment in the flow, so it gets an explicit patient recovery rather
+   * than an assumption that the handle still works.
+   */
+  async waitForBoot() {
+    this.rung('boot', 'active', 'board is resetting');
+
+    const port = await this.driver.waitForBoard(this.port, {
+      onWait: (_n, remaining) =>
+        this.rung('boot', 'active', `waiting for the bus · ${Math.ceil(remaining / 1000)}s`),
+    });
+    if (!port) return this.fail('boot', 'no_reopen');
+
+    this.port = port;
+    this.rung('boot', 'active', 'back on the bus');
+    if (!(await this.openLink())) return this.fail('boot', 'no_open', this._openError);
+
+    this.rung('boot', 'done', 'running');
+    return this.identify();
+  }
+
+  /* ---- 3. IDENTIFY ----------------------------------------------------- */
 
   /**
    * Wait for the board to say what it is.
@@ -272,7 +387,7 @@ export class Session {
     });
   }
 
-  /* ---- 3. TELEMETRY ---------------------------------------------------- */
+  /* ---- 4. TELEMETRY ---------------------------------------------------- */
 
   /**
    * The board is identified. It now has to keep reporting.
@@ -294,9 +409,17 @@ export class Session {
     return this.state.hello;
   }
 
-  /** Called on the first beat. Bring-up is over; the instrument takes it. */
+  /**
+   * Called on the first beat. Bring-up is over; the instrument takes it.
+   *
+   * Guarded on the rung rather than on the phase. The phase is a property of
+   * the whole flow and a rung is a property of the step, so a stale beat that
+   * arrives while a later step is running finds its rung no longer waiting and
+   * does nothing — which is the correct outcome and the one a phase check gets
+   * wrong in both directions.
+   */
   markLive() {
-    if (this.state.phase === 'done') return;
+    if (this.state.rungs.telemetry.state !== 'active') return;
     clearTimeout(this._beatTimer);
     this.rung('telemetry', 'done', 'reporting');
     this.log('telemetry is live', 'meta');
