@@ -52,7 +52,7 @@
    ========================================================================== */
 
 import { fault } from './faults.js';
-import { pushGap, applyDevice, applyPeripherals } from '../state.js';
+import { pushGap, applyDevice, applyPeripherals, applyUi } from '../state.js';
 
 export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'network', 'telemetry'];
 
@@ -107,6 +107,8 @@ export class Session {
     this._beatTimer = 0;
     this._relinkArmed = false;
     this._relinking = false;
+    /** A reconnect that arrived while one was running, to be run after it. */
+    this._relinkQueued = null;
     this.reset();
   }
 
@@ -171,7 +173,22 @@ export class Session {
     this.emit();
   }
 
-  emit() { this.onUpdate?.(this.state, this.monitor); }
+  /**
+   * Repaint. A renderer that throws must not take the flow down with it.
+   *
+   * emit() is called from inside log(), which is called from inside the
+   * reconnect, the flash and the provisioning paths. An exception in the
+   * callback is therefore an exception in the middle of whichever of those is
+   * running — and one bad paint once killed a reattach on its first line. The
+   * model's own subscribers are guarded the same way, for the same reason.
+   */
+  emit() {
+    try {
+      this.onUpdate?.(this.state, this.monitor);
+    } catch (err) {
+      console.error('[openhardware] bring-up render failed', err);
+    }
+  }
 
   /** True once dispose() has run. Cheap guard for anything long-running. */
   get disposed() { return this.onUpdate === null; }
@@ -188,6 +205,15 @@ export class Session {
    * collapse never fired on exactly the floods that need it.
    */
   log(text, kind = 'text') {
+    /* Once the instrument has taken over, the monitor this writes to is
+       hidden. Anything this session has to say after that — a link closing,
+       a reattach, a board that left the bus — goes to the note beside the
+       source badge as well, or a reconnection that fails does so with nothing
+       on screen to say it was even tried. The next heartbeat clears it. */
+    if (this.state.phase === 'done' && (kind === 'meta' || kind === 'error')) {
+      applyUi({ label: String(text) });
+    }
+
     const key = kind === 'text' ? String(text).replace(/\(\s*\d+\)/, '(#)') : text;
     const last = this.monitor[this.monitor.length - 1];
 
@@ -888,7 +914,9 @@ export class Session {
     if (typeof navigator === 'undefined' || !navigator.serial) return;
     this._relinkArmed = true;
 
-    this._onSerialConnect = () => { void this.relink('a board appeared on the bus'); };
+    this._onSerialConnect = () => {
+      void this.relink('a board appeared on the bus', { appeared: true });
+    };
     navigator.serial.addEventListener('connect', this._onSerialConnect);
 
     /* Returning to the tab is the other moment worth trying, because a
@@ -936,7 +964,7 @@ export class Session {
     if (!this._relinkArmed || this.state.phase !== 'done') return;
     pushGap(Date.now(), 'PORT CLOSED');
     applyDevice({ link: 'lost' });
-    await this.relink('the port closed');
+    await this.relink('the port closed', { justClosed: true });
   }
 
   /**
@@ -945,8 +973,17 @@ export class Session {
    * Bounded on purpose. If the board is not there, stop and wait to be told it
    * is, because retrying forever would be a poll wearing an event's clothes.
    */
-  async relink(why) {
-    if (this._relinking || this.disposed) return false;
+  async relink(why, { justClosed = false, appeared = false } = {}) {
+    if (this.disposed) return false;
+
+    /* Queued, not dropped. The ordinary fast replug is a `connect` event that
+       lands while the pass that noticed the board leaving is still running,
+       and the bus announces it exactly once. A pass that ignored it would
+       leave the page waiting for an event that already happened. */
+    if (this._relinking) {
+      this._relinkQueued = { why, appeared };
+      return false;
+    }
     /* Bring-up owns the port while it runs. This covers only the stretch after
        handover. */
     if (this.state.phase !== 'done') return false;
@@ -969,10 +1006,33 @@ export class Session {
 
     this._relinking = true;
     try {
-      this.log(`reattaching to the board - ${why}`, 'meta');
+      this.log(`reattaching to the board — ${why}`, 'meta');
       await this.closeLink();
 
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      /* The port just closed. Before hunting, ask the bus whether the device
+         is still on it. If it left, opening ports it is not behind finds
+         nothing — and holds this pass busy for exactly the seconds a fast
+         replug needs it free. Better to say so and wait to be told. */
+      if (justClosed) {
+        const present = (await this.driver.portsLike?.(this.port)) ?? [];
+        if (!present.length) {
+          this.log('the board left the bus — waiting for it to come back', 'meta');
+          return false;
+        }
+      }
+
+      /* A board that just appeared has just booted, so there is no uptime to
+         protect. It goes through the same open-and-release cycle the post-write
+         path uses: that is what leaves this part running the application
+         rather than parked in its downloader, and it is the one path proven to
+         bring a board back on this hardware. */
+      if (appeared && typeof this.driver.waitForBoard === 'function') {
+        const back = await this.driver.waitForBoard(this.port, { timeoutMs: 8000 });
+        if (this.disposed) return false;
+        if (back) this.port = back;
+      }
+
+      for (let attempt = 1; attempt <= 5; attempt++) {
         if (this.disposed) return false;
         /* A board that has just enumerated may refuse an open for a moment.
            Waited before the first try, not only between tries. */
@@ -1018,6 +1078,13 @@ export class Session {
       return false;
     } finally {
       this._relinking = false;
+      /* Whatever arrived while this pass was busy gets its turn — unless the
+         pass succeeded, in which case there is nothing left to reattach. */
+      const queued = this._relinkQueued;
+      this._relinkQueued = null;
+      if (queued && !this.link?.open && !this.disposed) {
+        void this.relink(queued.why, { appeared: queued.appeared });
+      }
     }
   }
 

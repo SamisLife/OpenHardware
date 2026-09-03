@@ -288,5 +288,81 @@ function listen(scene = '') {
   feed.stop();
 }
 
+/* ------------------------------------------------------------------------ */
+/* a frozen frame is taken down                                              */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The camera is on and a frame has arrived. Then nothing does. The picture
+     must not sit there looking current — it is a confident image of a moment
+     that has passed, and it looks the same whether the sensor is fine or has
+     been pulled off its connector. What the panel may say is what it saw,
+     which is silence for a stated time, not a removal nobody observed. */
+  const feed = createFeed({ source: 'sim', frameStaleMs: 120 });
+  feed.handleFrame({ t: 'caps', camera: { state: 'ok', sensor: 'OV2640' }, i2c: [], streaming: true });
+
+  const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const b64 = Buffer.from(bytes).toString('base64');
+  const frame = seq => {
+    feed.handleFrame({ t: 'img', seq, w: 640, h: 480, q: 12, bytes: bytes.length, chunks: 1 });
+    feed.handleFrame({ t: 'imgd', seq, i: 0, d: b64 });
+  };
+
+  frame(41);
+  ok('a frame that arrives is shown', S.state.frame.seq === 41 && !!S.state.frame.url);
+
+  await wait(80);
+  frame(42);
+  await wait(80);
+  ok('frames that keep coming keep the picture up',
+     S.state.frame.seq === 42 && !!S.state.frame.url,
+     'the second frame did not re-arm the watchdog');
+
+  await wait(160);
+  ok('a streaming camera that goes silent has its frame taken down', S.state.frame.url === null);
+  ok('and the reason names the silence', /no frame has arrived/.test(S.state.frame.verdict || ''),
+     S.state.frame.verdict);
+  ok('without claiming the camera was removed', !/removed/i.test(S.state.frame.verdict || ''));
+
+  /* Off is not late. A camera nobody asked for frames from keeps its last
+     picture, because there was nothing it failed to send. */
+  frame(43);
+  feed.handleFrame({ t: 'cam_ack', on: false });
+  await wait(200);
+  ok('a camera switched off is not called late',
+     S.state.frame.seq === 43 && !!S.state.frame.url);
+  feed.stop();
+}
+
+/* ------------------------------------------------------------------------ */
+/* silence is a question, not a verdict                                      */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The board is the only thing that can say whether the sensor is still
+     there. Frames stopping is grounds for taking the picture down and asking
+     — never for concluding a removal nobody observed. */
+  let asked = 0;
+  const feed = createFeed({ source: 'sim', frameStaleMs: 100, ask: () => { asked++; } });
+  feed.handleFrame({ t: 'caps', camera: { state: 'ok', sensor: 'OV2640' }, i2c: [], streaming: true });
+
+  const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const b64 = Buffer.from(bytes).toString('base64');
+  feed.handleFrame({ t: 'img', seq: 51, w: 640, h: 480, q: 12, bytes: bytes.length, chunks: 1 });
+  feed.handleFrame({ t: 'imgd', seq: 51, i: 0, d: b64 });
+
+  await wait(180);
+  ok('frames going quiet asks the board what happened', asked === 1, `${asked} asks`);
+  ok('and the verdict claims nothing about the camera',
+     !/removed|disconnect/i.test(S.state.frame.verdict || ''), S.state.frame.verdict);
+
+  /* The answer settles it. Still present: the picture may come back, and
+     nothing was ever asserted about a removal. */
+  feed.handleFrame({ t: 'caps', camera: { state: 'ok', sensor: 'OV2640' }, i2c: [], streaming: true });
+  ok('a board that answers "still here" is believed',
+     S.state.peripherals.camera.state === 'ok');
+  feed.stop();
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

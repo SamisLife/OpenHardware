@@ -291,6 +291,58 @@ typedef enum {
 #define HW_CAM_TICK_MS     25
 
 /**
+ * Hot-plug: how often the sensor is asked whether it is still there, and how
+ * many silent answers in a row mean it is not.
+ *
+ * Once a second, because a module pulled off its connector should be reported
+ * within a couple of seconds and a probe costs one I2C start on an otherwise
+ * idle bus. Two misses rather than one: a single missed acknowledgement is
+ * within what a ribbon that is seated but not perfectly seated produces, and
+ * tearing the driver down over it would evict a working camera.
+ *
+ * Two rather than three because the probe no longer runs while frames are
+ * arriving — see HW_CAM_LIVE_US — so a miss can no longer be caused by this
+ * transaction contending with a capture. Raising the count to defend against
+ * that was defending against the wrong thing, and it cost a second of
+ * detection latency on every real removal. Every miss is logged, so a camera
+ * being evicted wrongly still leaves the reason on the wire.
+ */
+#define HW_CAM_WATCH_MS    1000
+#define HW_CAM_MISSES      2
+
+/**
+ * How recently a frame must have been captured for the probe to be skipped.
+ *
+ * While frames are arriving they ARE the liveness evidence, and better
+ * evidence than an acknowledgement: a sensor that just filled a framebuffer is
+ * present in a way no I2C ack can improve on. Probing anyway means putting a
+ * transaction on the bus while the driver is mid-capture, and a miss caused by
+ * that contention is indistinguishable from a ribbon that came out — so a
+ * working camera gets evicted, comes straight back, and presents as a stream
+ * that will not stay up.
+ *
+ * Two seconds: long enough to cover the gap between frames at any rate this
+ * harness paces, short enough that a pipeline which genuinely stalls falls
+ * back to the probe within one watch period.
+ *
+ * The window is skipped entirely once a capture has FAILED. A sensor that
+ * stopped filling framebuffers is the very thing being watched for, so waiting
+ * out a window whose whole purpose is "frames are arriving, do not interfere"
+ * would add two seconds to every real removal — which is exactly how the
+ * console's stale-frame backstop came to fire before the board had spoken.
+ */
+#define HW_CAM_LIVE_US     (2 * 1000 * 1000)
+
+/**
+ * Notice a camera arriving or leaving, from the camera task only.
+ *
+ * @return true when the state changed and the host should be told. False
+ *         every other second of the board's life, so that a `caps` frame is
+ *         sent when something happened rather than as a heartbeat.
+ */
+bool hw_camera_watch(void);
+
+/**
  * Every function below must be called from the camera task and no other.
  *
  * A framebuffer belongs to the driver that produced it, so a teardown racing a

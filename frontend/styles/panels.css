@@ -558,3 +558,337 @@
 .compose[hidden] { display: none; }
 
 .step[data-sim="true"] .step__label { color: var(--c-ink-3); }
+
+
+/* ---------------------------------------------------------------------------
+   The elements and modifiers of the agent panels.
+
+   The first port of these rules matched block names with a word boundary,
+   which silently excluded every `__element` and `--modifier` — the label,
+   input, examples, log head, step detail, reasoning rows and gate actions all
+   rendered unstyled while the blocks that contained them looked ported. Kept
+   as a separate section so the omission is visible in the history rather than
+   smoothed over.
+   ------------------------------------------------------------------------- */
+/* The goal is the one sentence a human wrote. It gets the largest body type
+   on the page, because everything below it exists to satisfy it. */
+.order__goal {
+  font-size: var(--fs-read);
+  line-height: 1.55;
+  color: var(--c-ink);
+  max-width: 68ch;
+}
+
+.order__goal.is-placeholder { color: var(--c-ink-3); }
+
+.order__constraints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.chip {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-2);
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  background: var(--c-recess);
+}
+
+.log__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px var(--pad);
+  background: var(--c-recess);
+  border-bottom: 1px solid var(--c-rule-soft);
+  flex: none;
+}
+
+.log__title {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-2);
+  font-weight: 600;
+}
+
+.attempt__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-bottom: 9px;
+}
+
+.attempt__n {
+  font-family: var(--f-mono);
+  font-weight: 600;
+  font-size: var(--fs-small);
+  letter-spacing: 0.1em;
+  color: var(--c-ink);
+}
+
+.attempt__verdict {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  color: var(--c-ink-2);
+}
+
+.attempt__verdict[data-tone="fault"]  { color: var(--c-red); }
+
+.attempt__verdict[data-tone="active"] { color: var(--c-amber); }
+
+.attempt__verdict[data-tone="ok"]     { color: var(--c-ink); }
+
+.attempt__meta {
+  margin-left: auto;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+}
+
+.step__glyph {
+  width: 7px; height: 7px;
+  border: 1px solid var(--c-ink-4);
+  align-self: center;
+  justify-self: center;
+}
+
+.step__label {
+  font-family: var(--f-cond);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--c-ink-2);
+}
+
+.step__detail {
+  font-family: var(--f-mono);
+  color: var(--c-ink-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The idempotency key. Small, dim, and always there — it is the receipt that
+   says this step claimed its side effect before performing it. */
+.step__key { color: var(--c-ink-4); opacity: 0.8; }
+
+.step__dur { color: var(--c-ink-3); min-width: 44px; text-align: right; }
+
+.reason__row { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: baseline; }
+
+.reason__row[data-field="change"] dd { color: var(--c-ink); }
+
+.reason__row[data-field="result"] dt { color: var(--c-ink-2); }
+
+.gate__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+
+.gate__mark {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--c-amber);
+}
+
+.gate__what { font-size: var(--fs-small); color: var(--c-ink); }
+
+.gate__why {
+  margin-top: 6px;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--c-ink-2);
+  max-width: 72ch;
+}
+
+.gate__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+
+.gate__policy { font-family: var(--f-mono); font-size: var(--fs-micro); color: var(--c-ink-3); }
+
+.gate__by { margin-left: auto; font-family: var(--f-mono); font-size: var(--fs-micro); color: var(--c-ink-4); }
+
+/* ========================================================================= */
+/* FIRMWARE + PROCEDURAL MEMORY                                              */
+/* ========================================================================= */
+
+/* The image history has priority for the panel height and scrolls when it
+   runs out. The learned-limits list below is the one that gives way — the
+   reverse squeezes the table to nothing in the two-column layout. */
+.fw__scroll { overflow: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; }
+
+.fw__ver { color: var(--c-ink); font-weight: 500; }
+
+.fw__sha, .fw__size, .fw__time { color: var(--c-ink-4); }
+
+.fw__noterow td { border-bottom: 1px solid var(--c-rule-soft); padding-top: 0; }
+
+.fw__note {
+  display: block;
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+  white-space: normal;
+  max-width: 46ch;
+}
+
+.limit {
+  padding: 6px var(--pad);
+  border-bottom: 1px solid var(--c-rule-soft);
+}
+
+.limit__key {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-3);
+  overflow-wrap: anywhere;
+}
+
+.limit__val {
+  font-family: var(--f-mono);
+  font-size: var(--fs-small);
+  color: var(--c-ink);
+  overflow-wrap: anywhere;
+}
+
+.limit__src {
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+}
+
+.limit__src::before { content: " · "; }
+
+.limit[data-committed="true"] .limit__val { color: var(--c-amber); }
+
+.compose__label {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-ink-3);
+}
+
+.compose__input {
+  width: 100%;
+  resize: vertical;
+  min-height: 3.2em;
+  font-family: inherit;
+  font-size: var(--fs-read);
+  line-height: 1.5;
+  color: var(--c-ink);
+  background: var(--c-recess);
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  padding: 9px 10px;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.compose__input::placeholder { color: var(--c-ink-4); }
+
+.compose__input:focus {
+  outline: none;
+  border-color: var(--c-amber-dim);
+}
+
+/* What the sentence parsed to, as it is typed. */
+.compose__read {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 1px;
+}
+
+.compose__read:empty { display: none; }
+
+/* A constraint the harness reports is a promise the console can keep. One it
+   cannot measure is shown struck through, so the difference is visible before
+   the run rather than argued about after it. */
+.chip[data-kind="goal"] {
+  color: var(--c-amber);
+  border-color: var(--c-amber-dim);
+  background: var(--c-amber-wash);
+}
+
+.chip[data-kind="measurable"] { color: var(--c-ink-2); }
+
+.chip[data-kind="unmeasurable"] {
+  color: var(--c-ink-4);
+  border-style: dashed;
+  text-decoration: line-through;
+  text-decoration-color: var(--c-ink-4);
+  cursor: help;
+}
+
+.compose__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.compose__note {
+  font-size: var(--fs-micro);
+  color: var(--c-ink-3);
+  max-width: 54ch;
+}
+
+.compose__examples {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 2px;
+}
+
+.eg {
+  font: inherit;
+  font-size: var(--fs-micro);
+  text-align: left;
+  color: var(--c-ink-3);
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--c-etch);
+  padding: 2px 0 2px 8px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.eg:hover { color: var(--c-ink-2); border-left-color: var(--c-amber-dim); }
+
+/* The standing admission that this run is a rehearsal. Amber because it wants
+   attention, once, and never red: nothing is wrong. */
+.order__rehearsal {
+  margin-top: 9px;
+  padding: 7px 9px;
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  color: var(--c-amber);
+  background: var(--c-amber-wash);
+  border-left: 2px solid var(--c-amber-dim);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  max-width: 68ch;
+}
+
+.order__rehearsal[hidden] { display: none; }
+
+.order__row { margin-top: 10px; }
+
+/* A step whose numbers did not come from the hardware. Deliberately plain and
+   deliberately present on every such row — a build log that hides which steps
+   were real is worth less than no build log. */
+.step__sim {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  color: var(--c-ink-4);
+  border: 1px dashed var(--c-etch);
+  border-radius: var(--radius);
+  padding: 0 4px;
+  cursor: help;
+}

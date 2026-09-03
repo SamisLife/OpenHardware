@@ -21,12 +21,14 @@ THE PORT IS EXCLUSIVE, MACHINE-WIDE
     Removing the browser from the picture is what makes the reading evidence
     about the firmware instead of evidence about the whole stack.
 
-IT WRITES EXACTLY ONE THING, AND ONLY WHEN ASKED
-    --prov hands a board its network credentials and then goes on watching, so
-    the acknowledgement and the join it triggers land on the same record as
-    everything else. That is the only frame this tool ever sends. It is here
-    because the port is exclusive: something has to be able to provision a
-    board while the page that would normally do it cannot hold the port.
+IT WRITES ONLY WHEN ASKED
+    --prov hands a board its network credentials and --cam turns the camera on,
+    and then both go on watching, so the acknowledgement and whatever follows
+    land on the same record as everything else. Those are the only frames this
+    tool sends. They are here because the port is exclusive: something has to
+    be able to drive a board while the page that would normally do it cannot
+    hold the port — which also makes this the way to tell a board that will not
+    stream from a page that cannot ask it to.
 
 WHAT IT IS ACTUALLY FOR
     The board already reports everything needed to tell a reboot from a stall:
@@ -378,6 +380,14 @@ class Watch:
         self.enumerations = 0
         # Sentinels seen that are not this protocol's, by name and count.
         self.foreign = {}
+        # Pictures, and the bytes in them. Counted because "the camera streams"
+        # is a claim that should rest on frames arriving, not on an ack.
+        self.images = 0
+        self.image_bytes = 0
+        # Whether --cam was used, and what the board said about it.
+        self.asked_cam = False
+        self.cam_ack = None
+        self.cam_err = None
 
     # ---- boots ----------------------------------------------------------
 
@@ -430,9 +440,21 @@ class Watch:
             # Chunks arrive in their dozens. The header carries everything a
             # reader needs; the chunks would bury every other line on screen.
             if t == 'img':
+                self.images += 1
+                try:
+                    self.image_bytes += int(f.get('bytes') or 0)
+                except (TypeError, ValueError):
+                    pass
                 self.out.line('frame', '< img #%s · %sx%s · %s bytes in %s chunks'
                               % (f.get('seq'), f.get('w'), f.get('h'),
                                  f.get('bytes'), f.get('chunks')))
+            return
+
+        if t == 'cam_ack':
+            self.cam_ack = bool(f.get('on'))
+            self.cam_err = f.get('err') or None
+            self.out.line('frame', '< cam_ack on=%s%s'
+                          % (self.cam_ack, ' · %s' % self.cam_err if self.cam_err else ''))
             return
 
         if t == 'status':
@@ -551,6 +573,10 @@ class Watch:
                     plural(self.text_lines, 'line'),
                     plural(self.enumerations, 'bus disappearance')))
 
+        if self.images:
+            out.line('meta', '   %s carrying %d bytes of picture'
+                     % (plural(self.images, 'image'), self.image_bytes))
+
         for tag, n in sorted(self.foreign.items()):
             out.line('bad', '   %s framed as #%s, a protocol this tool does not read'
                      % (plural(n, 'line'), tag))
@@ -579,6 +605,23 @@ class Watch:
                 out.line('boot', '   Reset reasons after the first boot: %s' % ', '.join(reasons))
             else:
                 out.line('boot', '   No reset reason was captured; the identity frames were missed.')
+        elif self.asked_cam:
+            # The whole point of --cam: it separates a board that will not
+            # stream from a page that cannot ask it to. Both present as an
+            # empty camera panel, and they are fixed in different files.
+            if self.images:
+                out.line('boot', '   The board streams. %s arrived after cam on, so the '
+                                 'firmware and the cable are fine — a console showing no '
+                                 'picture is not being answered, not being starved.'
+                         % plural(self.images, 'image'))
+            elif self.cam_ack is False:
+                out.line('bad', '   The board refused to stream: %s' % (self.cam_err or 'no reason given'))
+            elif self.cam_ack is None:
+                out.line('bad', '   The board never acknowledged cam on. Nothing this tool '
+                                'sent was acted on, which is a fault in the inbound path.')
+            else:
+                out.line('bad', '   The board acknowledged cam on and sent no pictures. '
+                                'The camera is not producing frames.')
         elif self.boots and self.beats:
             out.line('boot', '   One boot, uptime never went backwards. Any gap above was the '
                              'wire, not a restart.')
@@ -617,7 +660,7 @@ def plural(n, noun):
 
 # ---------------------------------------------------------------------------
 
-def run(port_name, args, out, watch, prov=None):
+def run(port_name, args, out, watch, outbound=()):
     """
     Read until interrupted, reconnecting when the board leaves the bus.
 
@@ -629,10 +672,21 @@ def run(port_name, args, out, watch, prov=None):
     reader = LineReader()
     port = None
     said_why = False
-    # Sent once, on the first open. Not on a reconnect: the board already has
-    # it, and re-provisioning a board mid-join would restart the very attempt
-    # this is watching.
-    pending_prov = prov
+    # Held until the board has said it is running.
+    #
+    # OPENING THE PORT CAN RESET THE BOARD. The control lines are the reset and
+    # boot straps on this part, so a frame written the instant the port opens is
+    # written to a chip that is still in its bootloader — and it lands nowhere,
+    # silently, because there is no receive task yet to land in. That produces a
+    # session where the tool reports having sent something, the board reports
+    # having received nothing, and the fault looks like it is in the inbound
+    # path rather than in the timing.
+    #
+    # The board's own identity frame is the proof: it is emitted from a task,
+    # after the protocol is up, which is exactly the condition for a write to be
+    # read. Sent once, not on every reconnect — the board already has them, and
+    # re-sending mid-join would restart the very attempt this is watching.
+    pending = list(outbound)
 
     while True:
         if port is None:
@@ -641,15 +695,9 @@ def run(port_name, args, out, watch, prov=None):
                 out.line('meta', '   listening on %s' % port_name)
                 said_why = False
 
-                if pending_prov is not None:
-                    # After the port is open and before anything is read, so
-                    # the acknowledgement and the join that follows it are both
-                    # on the record from the beginning.
-                    port.write(encode_frame(pending_prov))
-                    out.line('meta', '   > prov %s%s' % (
-                        pending_prov['ssid'],
-                        ' (with a passphrase)' if pending_prov.get('psk') else ' (open network)'))
-                    pending_prov = None
+                if pending:
+                    out.line('meta', '   holding %s until the board says it is running'
+                             % plural(len(pending), 'frame'))
             except serial.SerialException as err:
                 # Said once, then retried quietly. A board that has just reset
                 # is away for a second and does not need a line about it every
@@ -690,6 +738,19 @@ def run(port_name, args, out, watch, prov=None):
             frame, reason = decode_line(line)
             if frame is not None:
                 watch.frame(frame)
+                # The board is up and emitting from a task, so a write now has
+                # something to arrive at.
+                if pending and frame.get('t') in ('hello', 'beat'):
+                    for f in pending:
+                        port.write(encode_frame(f))
+                        if f['t'] == 'prov':
+                            out.line('meta', '   > prov %s%s' % (
+                                f['ssid'],
+                                ' (with a passphrase)' if f.get('psk') else ' (open network)'))
+                        else:
+                            out.line('meta', '   > %s'
+                                     % json.dumps(f, separators=(',', ':')))
+                    pending = []
             else:
                 watch.text(line, reason)
 
@@ -717,6 +778,8 @@ def main():
     p.add_argument('--log', help='write the same lines, uncoloured, to a file')
     p.add_argument('--no-color', action='store_true')
 
+    p.add_argument('--cam', action='store_true',
+                   help='turn the camera on, then count the pictures that arrive')
     p.add_argument('--prov', metavar='SSID',
                    help='hand the board this network, then watch it join')
     p.add_argument('--psk', metavar='PASSPHRASE',
@@ -726,6 +789,10 @@ def main():
     p.add_argument('--server', metavar='URL',
                    help='optional device API base URL, stored alongside the network')
     args = p.parse_args()
+
+    outbound = []
+    if args.cam:
+        outbound.append({'t': 'cam', 'on': True})
 
     prov = None
     if args.prov:
@@ -739,6 +806,7 @@ def main():
         prov = {'t': 'prov', 'ssid': args.prov, 'psk': psk}
         if args.server:
             prov['server'] = args.server
+        outbound.append(prov)
 
     if serial is None:
         sys.exit('monitor.py needs pyserial to reach a port:\n\n    pip install pyserial\n')
@@ -747,11 +815,15 @@ def main():
     log = open(args.log, 'w', encoding='utf-8') if args.log else None
     out = Out(colour=not args.no_color, log=log)
     watch = Watch(out, show_beats=args.beats)
+    # Recorded on the watch, not on the arguments, because the summary is what
+    # reads it — and only a run that actually asked for the camera is entitled
+    # to draw a conclusion about why no pictures arrived.
+    watch.asked_cam = bool(args.cam)
 
     out.line('meta', '   watching %s · Ctrl-C to stop' % port_name)
 
     try:
-        run(port_name, args, out, watch, prov=prov)
+        run(port_name, args, out, watch, outbound=outbound)
     except KeyboardInterrupt:
         pass
     finally:

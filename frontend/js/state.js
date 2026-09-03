@@ -151,6 +151,16 @@ export const state = {
     streaming: false,
     /** set once the operator has answered the camera prompt either way */
     cameraAsked: false,
+    /**
+     * Whether the operator asked for the stream, as distinct from whether it
+     * is running.
+     *
+     * A camera pulled off its connector and put back is a fresh driver with
+     * streaming off, so `streaming` goes false through no decision of theirs.
+     * Holding the intent separately is what lets the picture come back on its
+     * own instead of asking the same question every time a ribbon moves.
+     */
+    streamWanted: false,
     /** whether the board accepts a runtime `cfg` command, per its caps */
     cfg: false,
     /** { size, quality } the board reports it is running, or null */

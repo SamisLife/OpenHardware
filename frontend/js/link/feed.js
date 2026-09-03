@@ -35,13 +35,37 @@ import {
 const SILENCE_MS = 1500;
 
 /**
+ * How long a streaming camera may go without a frame before the page stops
+ * showing the last one and asks the board what is going on.
+ *
+ * THIS IS A BACKSTOP, NOT THE DETECTOR. A camera that has been removed is
+ * reported by the board: its watcher notices the sensor has stopped
+ * acknowledging and sends `caps`, and that frame — a statement from the thing
+ * that can actually see the connector — is what onCaps acts on. Inferring a
+ * removal from silence here would be guessing at a cause, which is the one
+ * thing this project refuses to do.
+ *
+ * What silence does justify is taking the picture down and asking. A frozen
+ * frame is a confident image of a moment that has passed, and it looks
+ * identical whether the sensor is fine, the pipeline stalled, or the link is
+ * too busy to carry frames. So the picture goes, the verdict names the
+ * silence and nothing else, and a `caps` request goes out so the board can
+ * settle what actually happened.
+ *
+ * Long enough that a real board at 8 fps, or the simulator at one frame every
+ * two seconds, never trips it while working.
+ */
+const FRAME_STALE_MS = 6000;
+
+/**
  * @param {object} opts
  *   onLost()   called once when the board stops reporting
  *   label      what to show on the source badge
  * @returns {{ handleFrame, handleText, stop, fresh }}
  */
-export function createFeed({ onLost = null, source = null } = {}) {
+export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_STALE_MS, ask = null } = {}) {
   let watchdog = 0;
+  let frameWatch = 0;
   let lastLink = null;
   let lastBeatAt = 0;
   /** The image currently being reassembled, or null. */
@@ -58,7 +82,11 @@ export function createFeed({ onLost = null, source = null } = {}) {
       case 'hello': return onHello(frame);
       case 'beat': return onBeat(frame);
       case 'caps': return onCaps(frame);
-      case 'cam_ack': return applyPeripherals({ streaming: !!frame.on });
+      case 'cam_ack': {
+        applyPeripherals({ streaming: !!frame.on });
+        armFrameWatch(!!frame.on);
+        return;
+      }
       /* What the board confirmed it is running, or why it refused. Read out of
          the ack rather than assumed from the request, so a config that never
          took cannot show as applied. */
@@ -157,6 +185,10 @@ export function createFeed({ onLost = null, source = null } = {}) {
     clearTimeout(watchdog);
     watchdog = setTimeout(() => {
       if (lastLink !== 'linked') return;
+      /* Already marked by whoever saw the port close. Firing again here would
+         draw a second gap for one outage and write "no telemetry" over the
+         line that says what actually happened to the cable. */
+      if (state.device.link !== 'linked') { lastLink = state.device.link; return; }
       lastLink = 'lost';
       pushGap(Date.now(), 'NO TELEMETRY');
       applyDevice({ link: 'lost' });
@@ -187,6 +219,7 @@ export function createFeed({ onLost = null, source = null } = {}) {
        the answer on file was about a different module. */
     if (isOk && !wasOk) patch.cameraAsked = false;
     applyPeripherals(patch);
+    armFrameWatch(patch.streaming && isOk);
 
     if (wasOk && !isOk) dropImage('The camera stopped answering and was removed.');
   }
@@ -260,11 +293,36 @@ export function createFeed({ onLost = null, source = null } = {}) {
       url,
       verdict: null,
     });
+    armFrameWatch(true);
+  }
+
+  /**
+   * Take the picture down if the camera is on and nothing has arrived.
+   *
+   * Armed on every finished frame and whenever streaming is confirmed on;
+   * cleared when it is confirmed off, because a camera nobody asked for
+   * frames from is not late. The verdict names the observation — silence for
+   * a stated time — and not a cause, because a pulled ribbon, a stalled
+   * pipeline and a link too busy to carry frames all look exactly like this.
+   */
+  function armFrameWatch(on) {
+    clearTimeout(frameWatch);
+    frameWatch = 0;
+    if (!on) return;
+    frameWatch = setTimeout(() => {
+      if (!state.peripherals.streaming || !state.frame.url) return;
+      dropImage(`The camera is on and no frame has arrived for ${(frameStaleMs / 1000).toFixed(1)} s.`);
+      /* Asked, not assumed. The board is the only thing that can say whether
+         the sensor is still there, and it answers a caps request at any time. */
+      ask?.();
+    }, frameStaleMs);
   }
 
   /** Drop the picture and say why. A stale frame is not a frame. */
   function dropImage(verdict) {
     inbound = null;
+    clearTimeout(frameWatch);
+    frameWatch = 0;
     if (shown) { URL.revokeObjectURL(shown); shown = null; }
     applyFrame({
       kind: null, seq: 0, ts: 0, width: 0, height: 0,
@@ -284,6 +342,8 @@ export function createFeed({ onLost = null, source = null } = {}) {
     stop() {
       clearTimeout(watchdog);
       watchdog = 0;
+      clearTimeout(frameWatch);
+      frameWatch = 0;
       inbound = null;
       lastBeatAt = 0;
       if (shown) { URL.revokeObjectURL(shown); shown = null; }

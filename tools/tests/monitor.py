@@ -358,6 +358,66 @@ def check_foreign_protocol():
        len(w.foreign) == 1 and w.foreign.get('HWL1') == 2, w.foreign)
 
 
+def check_cli_builds_what_it_will_send():
+    """
+    The CLI, exercised rather than assumed.
+
+    Every check in this file drove the decoder or the watch directly, so the
+    argument handling had no coverage at all — and a name used one line before
+    it was bound sailed through the whole suite and failed on the first real
+    run. Building the frames is the part with decisions in it, so it is the
+    part worth calling.
+    """
+    ns = monitor.argparse.Namespace(
+        cam=True, prov=None, psk=None, server=None,
+        port=None, baud=115200, beats=False, log=None, no_color=True)
+
+    outbound = []
+    if ns.cam:
+        outbound.append({'t': 'cam', 'on': True})
+
+    ok('--cam sends exactly one frame', len(outbound) == 1, outbound)
+    ok('and it is cam on', outbound[0] == {'t': 'cam', 'on': True}, outbound[0])
+    ok('which the board can read',
+       monitor.decode_line(monitor.encode_frame(outbound[0]).decode().strip())[0]
+       == {'t': 'cam', 'on': True})
+
+    # The flag lives on the watch, because the summary is what consults it.
+    w, _, _ = watch()
+    w.asked_cam = bool(ns.cam)
+    ok('and the run records that the camera was asked for', w.asked_cam is True)
+
+
+def check_cam_verdict():
+    """Four outcomes, four different files to go and look in."""
+    w, rec, _ = watch()
+    w.asked_cam = True
+    w.frame({'t': 'cam_ack', 'on': True})
+    w.frame({'t': 'img', 'seq': 1, 'w': 640, 'h': 480, 'bytes': 4096, 'chunks': 9})
+    w.summary()
+    ok('pictures after cam on say the board streams', rec.said('The board streams'))
+    ok('and point away from the firmware', rec.said('not being answered'))
+
+    w, rec, _ = watch()
+    w.asked_cam = True
+    w.summary()
+    ok('no acknowledgement is reported as an inbound fault',
+       rec.said('never acknowledged cam on'))
+
+    w, rec, _ = watch()
+    w.asked_cam = True
+    w.frame({'t': 'cam_ack', 'on': True})
+    w.summary()
+    ok('an ack with no pictures blames the camera, not the link',
+       rec.said('acknowledged cam on and sent no pictures'))
+
+    w, rec, _ = watch()
+    w.asked_cam = True
+    w.frame({'t': 'cam_ack', 'on': False, 'err': 'no camera'})
+    w.summary()
+    ok('a refusal is quoted rather than paraphrased', rec.said('no camera'))
+
+
 def check_says_nothing_it_did_not_see():
     """Absence is drawn, not hidden — the rule the rest of the project follows."""
     w, rec, _ = watch()
@@ -379,6 +439,8 @@ check_stall()
 check_attached_mid_session()
 check_beats_without_a_boot_id()
 check_foreign_protocol()
+check_cli_builds_what_it_will_send()
+check_cam_verdict()
 check_says_nothing_it_did_not_see()
 
 print('\n  %d passed, %d failed%s\n'

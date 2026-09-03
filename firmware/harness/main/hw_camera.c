@@ -44,11 +44,39 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "driver/i2c.h"
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 
 static const char *TAG = "hw_camera";
+
+/**
+ * The I2C port the camera component put SCCB on.
+ *
+ * The legacy driver, deliberately: main/CMakeLists.txt explains why the new
+ * one cannot be linked alongside the camera on this IDF, and this file is the
+ * only other thing in the harness that touches the bus. A probe here is the
+ * same start-address-stop the SCCB layer itself issues.
+ */
+#define SCCB_PORT I2C_NUM_1
+
+/** Consecutive silent probes. See hw_camera_watch(). */
+static int s_misses = 0;
+
+/** When a frame was last captured. Liveness, when frames are flowing. */
+static int64_t s_last_capture_us = 0;
+
+/**
+ * Whether the last attempt to grab a frame came back empty.
+ *
+ * A capture that failed is the first evidence a removal produces, and it
+ * arrives a frame period after the ribbon moves rather than a watch period.
+ * Holding it here lets the watcher stop trusting the liveness window the
+ * moment it stops being true.
+ */
+static bool s_capture_failed = false;
 
 /* ----------------------------------------------------------------------------
    THE ONLY BOARD-SPECIFIC THING IN THE HARNESS
@@ -234,8 +262,49 @@ static hw_cam_state_t bring_up(void)
     return s_cam;
 }
 
+/**
+ * Whether the last reset was the board dying, as opposed to being told to.
+ *
+ * The counter guards against a probe that takes the board down, and it counts
+ * disappearances: a boot that entered the probe and never cleared the flag.
+ * But a host resets this board constantly during bring-up — every port open
+ * asserts DTR and RTS, which are the reset and boot straps — and a reset that
+ * lands in the second between the counter being written and the probe
+ * returning looks, to the counter, exactly like the probe crashing. Three
+ * reflashes in a row and a perfectly good camera is declared faulted until
+ * somebody erases NVS.
+ *
+ * So the reason is consulted. A panic, a watchdog or a brownout is the board
+ * dying and counts. Power-on, the EN pin, a software restart: somebody reset
+ * the board on purpose, and the probe never got a chance to prove anything
+ * either way. UNKNOWN counts, because a reset that cannot be explained is not
+ * one to be optimistic about.
+ */
+static bool last_reset_was_a_crash(void)
+{
+    switch (esp_reset_reason()) {
+        case ESP_RST_PANIC:
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_UNKNOWN:
+            return true;
+        default:
+            return false;
+    }
+}
+
 hw_cam_state_t hw_camera_probe(void)
 {
+    /* A boot that follows a deliberate reset starts the count over. The
+       previous boot did not die in the probe; it was interrupted, and an
+       interruption is not evidence about the camera. */
+    if (!last_reset_was_a_crash() && hw_prov_cam_tries() != 0) {
+        ESP_LOGI(TAG, "last reset was not a crash; clearing the camera probe counter");
+        hw_prov_set_cam_tries(0);
+    }
+
     const uint8_t tries = hw_prov_cam_tries();
 
     if (tries >= HW_CAM_MAX_TRIES) {
@@ -274,6 +343,113 @@ hw_cam_state_t hw_camera_probe(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/* hot-plug                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Whether the sensor still acknowledges its address.
+ *
+ * One start, the address, one stop. No register is read, because the question
+ * is not "what does it say" but "is anything there to say it" — and the
+ * acknowledgement bit is the only thing on this bus that answers that.
+ *
+ * A failure to build the command is not evidence of absence, so it counts as
+ * alive: a board short of memory has a different problem, and it is not that
+ * its camera fell off.
+ */
+static bool sccb_alive(void)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s || !s->slv_addr) return false;
+
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    if (!cmd) return true;
+
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (uint8_t)((s->slv_addr << 1) | I2C_MASTER_WRITE), true);
+    i2c_master_stop(cmd);
+    const esp_err_t err = i2c_master_cmd_begin(SCCB_PORT, cmd, pdMS_TO_TICKS(50));
+    i2c_cmd_link_delete(cmd);
+
+    return err == ESP_OK;
+}
+
+bool hw_camera_watch(void)
+{
+    switch (s_cam) {
+
+    case HW_CAM_OK:
+        /* A frame arrived a moment ago, so the sensor is there. Asking the bus
+           to confirm what a filled framebuffer already proved would only add a
+           transaction the driver has to share the bus with, and a miss caused
+           by that contention reads exactly like a removal. */
+        if (s_streaming && !s_capture_failed
+            && (esp_timer_get_time() - s_last_capture_us) < HW_CAM_LIVE_US) {
+            s_misses = 0;
+            return false;
+        }
+        if (sccb_alive()) { s_misses = 0; return false; }
+        /* Said every time, not only on the miss that evicts. A camera that is
+           being evicted wrongly is a camera that keeps coming and going, and
+           the count is the only thing that distinguishes that from a ribbon
+           somebody pulled. */
+        ESP_LOGW(TAG, "camera did not acknowledge on SCCB (miss %d of %d)",
+                 s_misses + 1, HW_CAM_MISSES);
+        if (++s_misses < HW_CAM_MISSES) return false;
+
+        /* Gone. Streaming is cleared before the driver is released — the
+           frame loop checks that flag and shares this task, so no framebuffer
+           can be in flight across the deinit. Single ownership is what makes
+           that true by construction rather than by luck. */
+        s_streaming = false;
+        esp_camera_deinit();
+        strcpy(s_sensor, "none");
+        s_cam = HW_CAM_ABSENT;
+        s_misses = 0;
+        s_frames = 0;
+        s_fps = 0.0f;
+        s_capture_failed = false;
+
+        ESP_LOGW(TAG, "camera stopped answering on SCCB; treating it as removed");
+        hw_proto_status("camera_absent", "the sensor stopped answering");
+        return true;
+
+    case HW_CAM_ABSENT: {
+        /* No NVS counting on this path, and that is not a gap. The counter
+           exists to survive a probe that never returns; a probe that takes the
+           board down still lands on the counted boot probe when it comes back.
+           Counting here too would write flash once a second for as long as a
+           board sits with nothing attached. */
+        if (hw_prov_cam_tries() >= HW_CAM_MAX_TRIES) return false;
+
+        /* The component narrates a failed probe at ERROR level across three
+           tags, and this runs once a second for as long as no camera is
+           attached. On an endpoint shared with the protocol that is not noise,
+           it is the monitor being unusable. Silenced for the attempt only; the
+           boot probe still narrates in full, and so does a success. */
+        esp_log_level_set("camera", ESP_LOG_NONE);
+        esp_log_level_set("sccb", ESP_LOG_NONE);
+        esp_log_level_set("cam_hal", ESP_LOG_NONE);
+        const hw_cam_state_t got = bring_up();
+        esp_log_level_set("camera", ESP_LOG_INFO);
+        esp_log_level_set("sccb", ESP_LOG_INFO);
+        esp_log_level_set("cam_hal", ESP_LOG_INFO);
+
+        if (got != HW_CAM_OK) return false;
+
+        ESP_LOGI(TAG, "camera attached: %s", s_sensor);
+        hw_proto_sendf("status", "\"stage\":\"camera_ok\",\"detail\":\"%s\"", s_sensor);
+        return true;
+    }
+
+    default:
+        /* UNTRIED belongs to the boot probe. FAULTED is never touched again
+           without a manual erase, which is the whole point of FAULTED. */
+        return false;
+    }
+}
+
+/* ------------------------------------------------------------------------ */
 /* capture                                                                   */
 /* ------------------------------------------------------------------------ */
 
@@ -297,9 +473,17 @@ bool hw_camera_capture_and_send(uint32_t seq)
     if (s_cam != HW_CAM_OK) return false;
 
     camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) return false;
+    if (!fb) {
+        /* The watcher stops trusting the liveness window on this, so a sensor
+           that has stopped producing is probed on the next tick rather than
+           two seconds later. */
+        s_capture_failed = true;
+        return false;
+    }
 
+    s_capture_failed = false;
     s_frames++;
+    s_last_capture_us = esp_timer_get_time();
     fps_roll();
 
     hw_proto_send_image(fb->buf, fb->len, seq,

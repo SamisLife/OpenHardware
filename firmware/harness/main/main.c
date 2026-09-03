@@ -426,14 +426,24 @@ static void camera_task(void *arg)
 
     uint32_t seq = 0;
     int64_t last_frame = 0;
+    int64_t last_watch = 0;
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(HW_CAM_TICK_MS));
+        const int64_t now = esp_timer_get_time() / 1000;
+
+        /* Arrival and removal, on their own slower clock than the tick. Told
+           to the host only when something changed: a `caps` every second
+           would be chatter on a link already carrying telemetry and frames,
+           and a host that wants the current answer can ask for it. */
+        if (now - last_watch >= HW_CAM_WATCH_MS) {
+            last_watch = now;
+            if (hw_camera_watch()) send_caps();
+        }
 
         if (!hw_camera_streaming()) continue;
         if (hw_camera_state() != HW_CAM_OK) continue;
 
-        const int64_t now = esp_timer_get_time() / 1000;
         if (now - last_frame < HW_CAM_FRAME_MS) continue;
 
         /* Stamped after the send, not before it. Putting an image on the wire

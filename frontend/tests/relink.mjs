@@ -65,25 +65,37 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 function cableDriver() {
   const base = simulatedDriver('');
   let present = true;
-  const counts = { opened: 0 };
-
-  return {
+  const counts = { opened: 0, cycled: 0 };
+  const d = {
     ...base,
     /* Not simulated, so relink arms. The transport underneath is still the
        simulated board, which is the point: the reconnection logic is what is
        under test, not the wire. */
     simulated: false,
     blockedReason: () => null,
-    async portsLike() { return present ? [{ id: 'port-a' }] : []; },
+    /* How long the bus takes to answer. Zero normally; raised by a test that
+       needs a pass to still be running when something else happens. */
+    busDelayMs: 0,
+    async portsLike() {
+      if (d.busDelayMs) await wait(d.busDelayMs);
+      return present ? [{ id: 'port-a' }] : [];
+    },
     async openPort(port, handlers) {
       counts.opened++;
       if (!present) throw new Error('device gone');
       return base.openPort(port, handlers);
     },
+    /* The post-write cycle, stood in for. The real one opens and releases the
+       port; here it only has to be seen to have been asked for. */
+    async waitForBoard(port) {
+      counts.cycled++;
+      return present ? port : null;
+    },
     unplug() { present = false; },
     replug() { present = true; },
     counts,
   };
+  return d;
 }
 
 /** Drive a session to the point where the instrument has taken over. */
@@ -125,18 +137,25 @@ async function live(driver) {
   /* The board leaves. What must NOT happen is a hunt for it. */
   d.unplug();
   await s.closeLink();
-  await s.relink('the port closed');
+  const t0 = Date.now();
+  await s.relink('the port closed', { justClosed: true });
 
   ok('a board that is not on the bus is not chased',
      d.counts.opened === before,
      `${d.counts.opened - before} opens against a bus reporting no ports`);
+  ok('and the pass ends at once rather than holding the line',
+     Date.now() - t0 < 200, `${Date.now() - t0} ms`);
   ok('and the attempt is on the record',
-     s.monitor.some(l => /no permitted serial port matches/.test(l.text)));
+     s.monitor.some(l => /left the bus/.test(l.text)));
+  ok('where the console view can see it',
+     /left the bus/.test(state.ui.label), state.ui.label);
 
   /* It comes back, and the bus says so. */
   d.replug();
-  const ok2 = await s.relink('a board appeared on the bus');
+  const ok2 = await s.relink('a board appeared on the bus', { appeared: true });
   ok('a board that is back is picked up again', ok2 === true);
+  ok('after being taken through the open-and-release cycle', d.counts.cycled === 1,
+     `${d.counts.cycled} cycles`);
   ok('the link is open once more', s.link?.open === true);
   ok('and the telemetry rung says so', s.state.rungs.telemetry.state === 'done');
 
@@ -147,6 +166,71 @@ async function live(driver) {
      JSON.stringify(state.peripherals));
 
   await s.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The ordinary fast replug: the bus announces the board coming back while
+     the pass that noticed it leaving is still asking the bus about it. That
+     event fires once. It must be queued, not lost. */
+  const d = cableDriver();
+  const s = await live(d);
+
+  d.unplug();
+  await s.closeLink();
+  d.busDelayMs = 200;
+  const first = s.relink('the port closed', { justClosed: true });
+  await wait(30);
+
+  const second = await s.relink('a board appeared on the bus', { appeared: true });
+  ok('a connect that lands during a pass is not run on top of it', second === false);
+  ok('but is remembered', s._relinkQueued?.appeared === true);
+
+  d.replug();
+  d.busDelayMs = 0;
+  await first;
+  await wait(600);
+  ok('and runs once the pass ends', s.link?.open === true, 'the queued reconnect never ran');
+  ok('nothing is left queued afterwards', s._relinkQueued === null);
+
+  await s.dispose();
+}
+
+/* ------------------------------------------------------------------------ */
+
+{
+  /* A renderer that throws must not take the reconnect down with it. The
+     session emits on every log line, and the first thing a reattach does is
+     log — so a callback that fails in that moment used to fail the reattach,
+     silently, on its first line. */
+  const d = cableDriver();
+  let paints = 0;
+  /* The guard reports each failure, which is right in a browser and forty
+     lines of noise here. Counted rather than printed for the duration. */
+  const report = console.error;
+  let reported = 0;
+  console.error = () => { reported++; };
+  try {
+    const s = new Session(d, () => { paints++; throw new Error('renderer died'); });
+    await s.connect();
+    await s.continueWithBoard();
+    await s.skipNetwork();
+    await wait(500);
+    ok('bring-up completes despite a renderer that throws on every paint',
+       s.state.phase === 'done', `phase ${s.state.phase} after ${paints} paints`);
+
+    d.unplug();
+    await s.closeLink();
+    d.replug();
+    const back = await s.relink('a board appeared on the bus', { appeared: true });
+    ok('and so does a reconnect', back === true && s.link?.open === true);
+    ok('and every failure was reported rather than swallowed', reported === paints,
+       `${reported} reported of ${paints} paints`);
+    await s.dispose();
+  } finally {
+    console.error = report;
+  }
 }
 
 /* ------------------------------------------------------------------------ */

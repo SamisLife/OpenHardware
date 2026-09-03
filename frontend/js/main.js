@@ -81,7 +81,11 @@ mountPeripherals($('#vitals'), {
  * board re-reports what is attached.
  */
 async function setCamera(on) {
-  applyPeripherals({ cameraAsked: true });
+  /* The intent is recorded separately from the state. A ribbon that comes out
+     and goes back in leaves streaming off through no decision of anybody's,
+     and this is what lets the picture return by itself rather than putting the
+     same question up every time the hardware moves. */
+  applyPeripherals({ cameraAsked: true, streamWanted: on });
   try { await link?.send({ t: 'cam', on }); }
   catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
 }
@@ -131,7 +135,7 @@ subscribe((s, changed) => {
      it has to repaint when that changes — including when it changes to
      nothing. */
   if (changed.has('frame') || changed.has('device') || changed.has('peripherals')) renderCamera(s);
-  if (changed.has('peripherals')) { renderPeripherals(s); syncCameraPanel(s); }
+  if (changed.has('peripherals')) { renderPeripherals(s); syncCameraPanel(s); resumeCamera(s); }
   if (changed.has('workOrder')) { renderWorkOrder(s); renderComposer(s); }
   /* Attempts drive the learned-limits list too: what the board has been shown
      to do is read off the attempts rather than stored separately, so there is
@@ -147,6 +151,32 @@ subscribe((s, changed) => {
 /** The camera panel exists only while there is a camera behind it. */
 function syncCameraPanel(s) {
   document.body.dataset.camera = s.peripherals.camera?.state === 'ok' ? 'on' : 'off';
+}
+
+/** Whether the camera was reported present on the previous paint. */
+let camWasOk = false;
+
+/**
+ * Put the stream back after a camera comes back.
+ *
+ * A sensor pulled off its connector and reseated is a fresh driver with
+ * streaming off, and the board is right to report that. But nobody decided to
+ * stop watching, so asking again would be asking a question already answered —
+ * and the answer would have to be given again every time a ribbon moved.
+ *
+ * Only on the transition into present, and only when the operator had asked
+ * for it. A camera that has been there all along is left exactly as it is.
+ */
+function resumeCamera(s) {
+  const isOk = s.peripherals.camera?.state === 'ok';
+  const wasOk = camWasOk;
+  camWasOk = isOk;
+
+  if (!isOk || wasOk) return;
+  if (!s.peripherals.streamWanted || s.peripherals.streaming) return;
+
+  announce('Camera back. Resuming the stream.');
+  setCamera(true);
 }
 
 function renderSource(s) {
@@ -261,23 +291,46 @@ function retry() {
  * leave the instrument fed by a port that no longer exists.
  */
 function goLive(s) {
-  if (link && link === s.link) return;
+  /* Only an open link is handed over. The session emits on every log line,
+     and while it is reattaching after a replug its link is null for a moment
+     — a handover then would point the instrument at nothing and ask nothing
+     for its capabilities, which is a TypeError thrown back up into the
+     reattach itself, killing it on its first line. */
+  if (!s.link?.open) return;
+  if (link === s.link) return;
 
   hideOnboard();
   document.body.dataset.view = 'console';
   link = s.link;
 
-  feed?.stop();
-  feed = createFeed({
-    source: simulated ? 'sim' : 'usb',
-    onLost: () => applyUi({ label: 'no telemetry' }),
-  });
-  /* The bring-up session keeps the port; every frame is copied on to the
-     instrument. Closing the link here would stop the telemetry it just
-     established. */
-  s.frameSink = feed.handleFrame;
+  /* The feed is made once per session and kept across every link that
+     follows — a replug, a reflash. It belongs to the page, not to the port:
+     tearing it down for a new link revokes the frame on screen, forgets which
+     way the link last went, and re-arms every watchdog from zero, all of which
+     showed as the instrument flickering on every reconnect. The session keeps
+     the port; every frame is copied on to the instrument through the sink,
+     and the sink survives the port it was set up with. */
+  if (!feed) {
+    feed = createFeed({
+      source: simulated ? 'sim' : 'usb',
+      onLost: () => applyUi({ label: 'no telemetry' }),
+      /* Frames stopped. The board is the only thing that can say why, so it
+         gets asked rather than guessed at. */
+      ask: () => link?.send({ t: 'caps' }).catch(() => {}),
+    });
+    s.frameSink = feed.handleFrame;
+    applyUi({ label: simulated ? (scene ? `simulated · ${scene}` : 'simulated') : '' });
+  }
 
-  applyUi({ label: simulated ? (scene ? `simulated · ${scene}` : 'simulated') : '' });
+  /* Ask what is attached — after the sink exists, or the answer lands with
+     nothing listening. The board announces its capabilities once, when its
+     camera probe finishes about a second after boot, which is long before a
+     page attaches to a board that was already running. Without this ask, a
+     board that booted with a camera on it reports "waiting for the board to
+     report what is attached" for as long as the page is open. Asked again on
+     every new link for the same reason: the board on the other end of it has
+     just rebooted. */
+  link.send({ t: 'caps' }).catch(() => {});
 }
 
 /* ------------------------------------------------------------------------ */
