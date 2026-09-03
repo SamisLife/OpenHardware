@@ -86,9 +86,9 @@ export function renderWorkOrder(state) {
   el.status.textContent = STATUS_LABEL[wo?.status || 'idle'] || 'UNKNOWN';
   el.status.dataset.status = wo?.status || 'idle';
 
-  /* The composer occupies this space until there is a work order; see
-     composer.js. Two views of one slot rather than a placeholder that has to
-     pretend to be both. */
+  /* The belt occupies this space until there is a work order; see belt.js.
+     Two views of one slot rather than a placeholder that has to pretend to
+     be both. */
   el.order.hidden = !wo;
   if (!wo) {
     el.constraints.innerHTML = '';
@@ -103,7 +103,7 @@ export function renderWorkOrder(state) {
   if (wo.rehearsal && el.rehearsal.textContent !== wo.rehearsal) {
     el.rehearsal.textContent = wo.rehearsal;
   }
-  el.abandon.textContent = wo.status === 'running' ? 'Abandon and rewrite' : 'New work order';
+  el.abandon.textContent = wo.status === 'running' ? 'Abandon' : 'Clear';
 
   if (el.goal.textContent !== wo.goal) el.goal.textContent = wo.goal;
   el.id.textContent = wo.id;

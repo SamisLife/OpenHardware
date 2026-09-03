@@ -208,9 +208,11 @@ export const state = {
      * standard, so the first call is the first evidence of one, `tool` is what
      * it is doing right now, and `quiet` is silence for long enough. `available`
      * is whether the browser offers document.modelContext at all — null until
-     * the page has looked.
+     * the page has looked. `tools` is every tool the page offers and whether
+     * each is registered at this moment, published by the toolbelt so the
+     * panel can draw what an agent would find.
      */
-    agent: { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false },
+    agent: { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false, tools: [] },
   },
 };
 

@@ -115,7 +115,7 @@ const mounted = mountTools({ fx, modelContext: mc, quietMs: 200 });
 const call = async (name, input = {}, signal) => {
   const tool = mc.get(name);
   if (!tool) throw new Error(`no tool named ${name}`);
-  return JSON.parse(await tool.execute(input, { signal }));
+  return tool.execute(input, { signal });
 };
 
 const READ = ['capture_frame', 'get_board', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_work_order'];
@@ -138,6 +138,11 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   ok('once a board is linked the write tools appear', WRITE.every(n => mc.names().includes(n)),
      mc.names().join(','));
   ok('and none of them claims to be read-only', WRITE.every(n => !mc.get(n).annotations?.readOnlyHint));
+  ok('every tool carries a short title for the panel',
+     [...READ, ...WRITE].every(n => typeof mc.get(n).title === 'string' && mc.get(n).title.length > 0));
+  ok('and the page records what is registered, for the panel',
+     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length + WRITE.length,
+     JSON.stringify(st.state.ui.agent.tools.map(t => `${t.name}:${t.registered}`)));
   ok('the registry was told each time the list moved', mc.changes >= READ.length + WRITE.length, mc.changes);
 
   const before = mc.changes;
@@ -146,6 +151,8 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   await wait(10);
   ok('losing the link withdraws every write tool', !WRITE.some(n => mc.names().includes(n)), mc.names().join(','));
   ok('and leaves the read tools', READ.every(n => mc.names().includes(n)));
+  ok('and the panel is told the writes are withdrawn',
+     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length);
   ok('which the registry was told about', mc.changes > before);
 
   st.applyDevice({ link: 'linked' });
@@ -160,6 +167,8 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
 
 {
   const r = await call('get_board');
+  ok('a result is an object for the registry to serialise once, not a string it would serialise twice',
+     r !== null && typeof r === 'object', typeof r);
   ok('a result carries the source', r.source === 'sim', r.source);
   ok('and the link state', r.link === 'linked', r.link);
   ok('the board is identified from what it reported', r.device.board === 'Simulated board', r.device.board);
@@ -363,6 +372,24 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   const none = mountTools({ fx, modelContext: null });
   ok('without document.modelContext nothing is registered', none.available === false && none.names().length === 0);
   ok('and the page records that tools are unavailable, for the hint', st.state.ui.agent.available === false);
+  ok('and still publishes the catalogue, none of it registered',
+     st.state.ui.agent.tools.length === READ.length + WRITE.length && st.state.ui.agent.tools.every(t => t.registered === false),
+     JSON.stringify(st.state.ui.agent.tools.map(t => t.registered)));
+}
+
+/* ------------------------------------------------------------------------ */
+/* the registry where the standard first hung it                            */
+/* ------------------------------------------------------------------------ */
+
+{
+  const mcN = fakeModelContext();
+  const desc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: { modelContext: mcN }, configurable: true, writable: true });
+  const m = mountTools({ fx });
+  ok('a registry on navigator, where the standard first put it, is found',
+     m.available === true && READ.every(n => mcN.names().includes(n)), mcN.names().join(','));
+  m.dispose();
+  if (desc) Object.defineProperty(globalThis, 'navigator', desc); else delete globalThis.navigator;
 }
 
 /* ------------------------------------------------------------------------ */

@@ -180,20 +180,25 @@
         <span class="tag" data-agent="status" data-status="idle">NO WORK ORDER</span>
       </header>
 
-      <form class="compose" data-wo="form" id="compose">
-        <label class="compose__label" for="wo-input">
-          What should the agent make this board do?
-        </label>
-        <textarea id="wo-input" class="compose__input" rows="2" spellcheck="false"
-                  data-wo="input"
-                  placeholder="Run the camera at the highest resolution this board can sustain at 10 fps or better."></textarea>
-        <ul class="compose__read" data-wo="read"></ul>
-        <div class="compose__row">
-          <button class="btn btn--primary" type="submit" data-wo="submit" disabled>Start the agent</button>
-          <p class="compose__note" data-wo="note"></p>
+      <!-- Nowhere to type. Instructions reach this board through an agent in
+           the browser, over WebMCP; what is drawn here is what that agent will
+           find when it looks. See js/render/belt.js. -->
+      <div class="belt" data-belt="root" id="belt">
+        <p class="belt__lede">
+          Instructions reach this board through an agent in the browser, not
+          through a form on this page. Open it in ChatGPT's built-in browser, or
+          in Chrome with WebMCP enabled, and ask for what the board should do.
+        </p>
+        <div class="belt__row">
+          <span class="tag" data-belt="avail" data-tone="muted">WEBMCP ––</span>
+          <span class="belt__presence" data-belt="presence"></span>
         </div>
-        <ul class="compose__examples" data-wo="examples"></ul>
-      </form>
+        <p class="belt__hint" data-belt="hint" hidden></p>
+        <span class="belt__label">Tools this page registers</span>
+        <ul class="tools" data-belt="tools"></ul>
+        <span class="belt__label">Things to ask the agent</span>
+        <ul class="belt__examples" data-belt="examples"></ul>
+      </div>
 
       <div class="order" data-agent="order" hidden>
         <p class="order__goal" data-agent="goal"></p>
@@ -213,7 +218,7 @@
       </div>
 
       <div class="log" data-agent="attempts"></div>
-      <p class="empty" data-agent="empty">No attempts yet. The agent has nothing to do until a work order exists.</p>
+      <p class="empty" data-agent="empty">No attempts yet. Every experiment an agent runs through the page's tools is recorded here.</p>
     </section>
 
     <!-- ---- images and what has been learned -------------------------- -->

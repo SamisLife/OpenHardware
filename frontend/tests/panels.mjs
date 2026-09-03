@@ -329,5 +329,55 @@ const { mountPeripherals, renderPeripherals } = await load('render/peripherals.j
      /unidentified device/.test(list.innerHTML));
 }
 
+/* ------------------------------------------------------------------------ */
+/* belt — the agent panel at rest                                            */
+/* ------------------------------------------------------------------------ */
+
+const { mountBelt, renderBelt } = await load('render/belt.js');
+
+{
+  const root = tree(['belt', 'avail'], ['belt', 'presence'], ['belt', 'hint'], ['belt', 'tools'], ['belt', 'examples']);
+  mountBelt(root);
+  const q = k => root.querySelector(`[data-belt=${k}]`);
+  const read = { name: 'get_board', title: 'identity', readOnly: true, registered: false };
+  const write = { name: 'set_camera', title: 'stream', readOnly: false, registered: false };
+
+  S.state.ui.agent = { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false, tools: [] };
+  renderBelt(S.state);
+  ok('before the page has looked for a registry, the belt claims nothing',
+     /––/.test(q('avail').textContent) && q('presence').textContent === '' && q('hint').hidden);
+
+  S.state.ui.agent = { ...S.state.ui.agent, available: false, tools: [read, write] };
+  renderBelt(S.state);
+  ok('with no registry the belt says so, and says where one is found',
+     q('avail').textContent === 'NO REGISTRY' && !q('hint').hidden
+       && /ChatGPT/.test(q('hint').textContent) && /chrome:\/\/flags/.test(q('hint').textContent));
+  ok('and still lists every tool, none of it registered',
+     /get_board/.test(q('tools').innerHTML) && /set_camera/.test(q('tools').innerHTML)
+       && !/data-registered="true"/.test(q('tools').innerHTML));
+
+  S.state.ui.agent = { ...S.state.ui.agent, available: true, tools: [{ ...read, registered: true }, write] };
+  renderBelt(S.state);
+  ok('with a registry and no caller yet, the tools are ready',
+     q('avail').textContent === 'TOOLS READY' && /1 registered/.test(q('presence').textContent) && q('hint').hidden);
+  ok('a write tool withdrawn for want of a board says so',
+     /withdrawn until a board is linked/.test(q('tools').innerHTML));
+
+  S.state.ui.agent = { ...S.state.ui.agent, seen: true, tool: 'watch_for', calls: 3 };
+  renderBelt(S.state);
+  ok('a running tool is named', q('avail').textContent === 'AGENT' && /running watch_for/.test(q('presence').textContent));
+
+  S.state.ui.agent = { ...S.state.ui.agent, tool: null, quiet: true, lastAt: Date.now() };
+  renderBelt(S.state);
+  ok('silence is reported with the count of calls', /quiet since/.test(q('presence').textContent) && /3 calls/.test(q('presence').textContent));
+
+  S.state.workOrder = { id: 'wo_1', goal: 'g', status: 'running' };
+  renderBelt(S.state);
+  ok('a work order takes the slot', root.hidden === true);
+  S.state.workOrder = null;
+  renderBelt(S.state);
+  ok('and clearing it gives the slot back', root.hidden === false);
+}
+
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

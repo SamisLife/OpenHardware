@@ -540,22 +540,137 @@
 .limits { padding: 4px 0 10px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
 
 /* ==========================================================================
-   COMPOSE — writing a work order
+   BELT — the agent panel at rest
    --------------------------------------------------------------------------
-   The resting state of the agent panel. It reads as a form on an instrument,
-   not as a chat: one field, one action, and a live read-back of what the
-   sentence parsed to. No colour until something is actually understood.
+   Nowhere to type. What is drawn here is what an agent will find when it
+   looks: whether this browser has a registry, which tools are registered at
+   this moment, and whether anything has called one. Colour only when an agent
+   is actually calling; a list of tools nobody has used is nominal, and
+   nominal is grey.
    ========================================================================== */
 
-.compose {
+.belt {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
   padding: var(--pad);
   border-bottom: 1px solid var(--c-rule-soft);
+  /* Fourteen tools and three requests outrun a short panel. The belt gives
+     way and scrolls inside itself rather than pushing the build log off the
+     bottom of the instrument, where the one thing an agent writes to would
+     be the one thing nobody could see. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
-.compose[hidden] { display: none; }
+.belt[hidden] { display: none; }
+
+.belt__lede {
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--c-ink-2);
+  max-width: 64ch;
+}
+
+.belt__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.belt__presence {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: var(--ls-label);
+  color: var(--c-ink-3);
+}
+
+.belt__hint {
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  color: var(--c-ink-3);
+  max-width: 60ch;
+}
+
+.belt__hint[hidden] { display: none; }
+
+.belt__label {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-ink-3);
+}
+
+/* One row per tool: kind, name, what it does. A grid rather than a table so
+   the names line up in a column without the markup of one. */
+.tools {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+  gap: 3px 10px;
+  align-items: baseline;
+}
+
+.tool { display: contents; }
+
+.tool__kind {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  color: var(--c-ink-4);
+}
+
+.tool[data-kind="write"] .tool__kind { color: var(--c-amber-dim); }
+
+.tool__name {
+  font-family: var(--f-mono);
+  font-size: var(--fs-small);
+  color: var(--c-ink);
+}
+
+.tool__title {
+  font-size: var(--fs-small);
+  line-height: 1.4;
+  color: var(--c-ink-3);
+  min-width: 0;
+}
+
+/* A tool that is not registered right now is listed, and dimmed, and says why. */
+.tool[data-registered="false"] .tool__name,
+.tool[data-registered="false"] .tool__title { color: var(--c-ink-4); }
+
+.tool__state::before { content: " · "; }
+
+.belt__examples {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ask {
+  font: inherit;
+  font-size: var(--fs-micro);
+  text-align: left;
+  color: var(--c-ink-3);
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--c-etch);
+  padding: 2px 0 2px 8px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.ask:hover { color: var(--c-ink-2); border-left-color: var(--c-amber-dim); }
+
+.ask[data-flash]::after {
+  content: attr(data-flash);
+  margin-left: 8px;
+  color: var(--c-amber);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 
 .step[data-sim="true"] .step__label { color: var(--c-ink-3); }
 
@@ -766,100 +881,6 @@
 .limit__src::before { content: " · "; }
 
 .limit[data-committed="true"] .limit__val { color: var(--c-amber); }
-
-.compose__label {
-  font-family: var(--f-cond);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--c-ink-3);
-}
-
-.compose__input {
-  width: 100%;
-  resize: vertical;
-  min-height: 3.2em;
-  font-family: inherit;
-  font-size: var(--fs-read);
-  line-height: 1.5;
-  color: var(--c-ink);
-  background: var(--c-recess);
-  border: 1px solid var(--c-etch);
-  border-radius: var(--radius);
-  padding: 9px 10px;
-  transition: border-color var(--dur-fast) var(--ease);
-}
-
-.compose__input::placeholder { color: var(--c-ink-4); }
-
-.compose__input:focus {
-  outline: none;
-  border-color: var(--c-amber-dim);
-}
-
-/* What the sentence parsed to, as it is typed. */
-.compose__read {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  min-height: 1px;
-}
-
-.compose__read:empty { display: none; }
-
-/* A constraint the harness reports is a promise the console can keep. One it
-   cannot measure is shown struck through, so the difference is visible before
-   the run rather than argued about after it. */
-.chip[data-kind="goal"] {
-  color: var(--c-amber);
-  border-color: var(--c-amber-dim);
-  background: var(--c-amber-wash);
-}
-
-.chip[data-kind="measurable"] { color: var(--c-ink-2); }
-
-.chip[data-kind="unmeasurable"] {
-  color: var(--c-ink-4);
-  border-style: dashed;
-  text-decoration: line-through;
-  text-decoration-color: var(--c-ink-4);
-  cursor: help;
-}
-
-.compose__row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.compose__note {
-  font-size: var(--fs-micro);
-  color: var(--c-ink-3);
-  max-width: 54ch;
-}
-
-.compose__examples {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-top: 2px;
-}
-
-.eg {
-  font: inherit;
-  font-size: var(--fs-micro);
-  text-align: left;
-  color: var(--c-ink-3);
-  background: none;
-  border: 0;
-  border-left: 1px solid var(--c-etch);
-  padding: 2px 0 2px 8px;
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
-}
-
-.eg:hover { color: var(--c-ink-2); border-left-color: var(--c-amber-dim); }
 
 /* The standing admission that this run is a rehearsal. Amber because it wants
    attention, once, and never red: nothing is wrong. */

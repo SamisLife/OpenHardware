@@ -33,7 +33,7 @@ import {
   mountOnboard, renderOnboard, showOnboard, hideOnboard, resetWire, eraseChecked,
 } from './render/onboard.js';
 import { mountAgent, renderWorkOrder, renderAttempts, renderGate } from './render/agent.js';
-import { mountComposer, renderComposer } from './render/composer.js';
+import { mountBelt, renderBelt } from './render/belt.js';
 import { mountFirmware, renderFirmware, renderMemory } from './render/firmware.js';
 import { startBuild } from './builder/run.js';
 import { parseObjective } from './builder/objective.js';
@@ -66,7 +66,9 @@ mountAgent($('#agent'), {
   onHold: () => { holdPending(); announce('Gate held. Nothing was written.'); },
   onAbandon: () => abandonBuild(),
 });
-mountComposer($('#compose'), { onSubmit: goal => startWorkOrder(goal) });
+/* Nowhere to type. What an agent will find when it looks is drawn in the
+   slot a form would otherwise occupy. */
+mountBelt($('#belt'));
 
 mountPeripherals($('#vitals'), {
   onCamera: on => setCamera(on),
@@ -136,7 +138,7 @@ subscribe((s, changed) => {
      nothing. */
   if (changed.has('frame') || changed.has('device') || changed.has('peripherals')) renderCamera(s);
   if (changed.has('peripherals')) { renderPeripherals(s); syncCameraPanel(s); resumeCamera(s); }
-  if (changed.has('workOrder')) { renderWorkOrder(s); renderComposer(s); }
+  if (changed.has('workOrder')) { renderWorkOrder(s); renderBelt(s); }
   /* Attempts drive the learned-limits list too: what the board has been shown
      to do is read off the attempts rather than stored separately, so there is
      no second copy to fall out of step. */
@@ -144,7 +146,7 @@ subscribe((s, changed) => {
   if (changed.has('memory')) renderMemory(s);
   if (changed.has('gate')) renderGate(s);
   if (changed.has('firmware')) renderFirmware(s);
-  if (changed.has('ui')) renderSource(s);
+  if (changed.has('ui')) { renderSource(s); renderBelt(s); }
   narrate(s, changed);
 });
 
@@ -331,6 +333,13 @@ function goLive(s) {
      every new link for the same reason: the board on the other end of it has
      just rebooted. */
   link.send({ t: 'caps' }).catch(() => {});
+
+  /* The identity that answered during bring-up is handed over straight away
+     rather than waited for. The board repeats its hello only every few
+     seconds once it is up, and an agent whose first call lands inside that
+     gap would otherwise be told the board has no name and no firmware — by a
+     page that has known both since the flash decision. */
+  if (s.state.hello) feed.handleFrame(s.state.hello);
 }
 
 /* ------------------------------------------------------------------------ */

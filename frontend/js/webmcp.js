@@ -214,6 +214,7 @@ function readTools(fx) {
   return [
     {
       name: 'get_board',
+      title: 'Board identity, capabilities and the frame-size ladder',
       description:
         'Identity and capabilities of the board this page is attached to: board name, MCU, '
         + 'MAC, firmware version and slot, link state, which source is driving the page '
@@ -247,6 +248,7 @@ function readTools(fx) {
 
     {
       name: 'get_telemetry_summary',
+      title: 'Telemetry over a window, as numbers rather than samples',
       description:
         'Telemetry over the last windowMs, summarised: per field the sample count, min, max, '
         + 'mean and slope in units per second. Fields: uptimeS, tempC (die °C), heapFree and '
@@ -272,6 +274,7 @@ function readTools(fx) {
 
     {
       name: 'get_learned_limits',
+      title: 'Limits established on this board so far',
       description:
         'Procedural memory: board-specific limits established so far, each with its key, '
         + 'value, who recorded it (the local loop, from an attempt, or an agent via '
@@ -284,6 +287,7 @@ function readTools(fx) {
 
     {
       name: 'capture_frame',
+      title: 'One frame from the camera, shown to the human',
       description:
         'Capture one frame from the camera. The frame is decoded and shown in the camera '
         + 'panel for the human; this returns its dimensions, JPEG quality, byte count and '
@@ -315,6 +319,7 @@ function readTools(fx) {
 
     {
       name: 'get_images',
+      title: 'Firmware images published and written',
       description:
         'Firmware images this page can write to the board: what the server has published '
         + '(version, project, ELF hash, parts with offsets and sizes) and what has already been '
@@ -346,6 +351,7 @@ function readTools(fx) {
 
     {
       name: 'get_work_order',
+      title: 'The work order and every attempt under it',
       description:
         'The current work order (goal, parsed constraints, status, who opened it) and every '
         + 'attempt recorded under it, newest last: steps with pass/fail/skipped status and '
@@ -375,6 +381,7 @@ function writeTools(fx) {
   return [
     {
       name: 'set_camera',
+      title: 'Start or stop the camera stream',
       description:
         'Start or stop the camera streaming frames over the cable. Frames cost bandwidth on a '
         + 'link shared with telemetry, so leave it off when not measuring. fps in telemetry is '
@@ -397,6 +404,7 @@ function writeTools(fx) {
 
     {
       name: 'set_camera_config',
+      title: 'Frame size and JPEG quality, changed at runtime',
       description:
         'Change the camera frame size and JPEG quality at runtime, without a rebuild or '
         + 'reflash. Only works on a board whose get_board reports cfgSupported; otherwise it '
@@ -427,6 +435,7 @@ function writeTools(fx) {
 
     {
       name: 'run_experiment',
+      title: 'Apply a config, soak, measure, record an attempt',
       description:
         'One closed measurement: apply a camera config, let the board run it for soakMs, '
         + 'summarise the telemetry over that window, and record the whole thing as an attempt '
@@ -450,6 +459,7 @@ function writeTools(fx) {
 
     {
       name: 'watch_for',
+      title: 'Block until telemetry or the link meets a condition',
       description:
         'Block until a condition on live telemetry or the link becomes true, or timeoutMs '
         + 'expires. Either `field`/`op`/`value` (field is a telemetry field name, op is one of '
@@ -486,6 +496,7 @@ function writeTools(fx) {
 
     {
       name: 'record_limit',
+      title: 'Write a learned limit into procedural memory',
       description:
         'Write a learned limit into the board\'s procedural memory, where the human reads it '
         + 'alongside what the local loop learned. Use a stable dotted key such as '
@@ -512,6 +523,7 @@ function writeTools(fx) {
 
     {
       name: 'flash_image',
+      title: 'Write the published image; asks a human first',
       description:
         'Write the published firmware image to the board. This ASKS A HUMAN FIRST: the call '
         + 'blocks until the operator presses Approve on the page, and returns refused if they '
@@ -539,6 +551,7 @@ function writeTools(fx) {
 
     {
       name: 'provision_wifi',
+      title: 'Store Wi-Fi credentials; asks a human first',
       description:
         'Store Wi-Fi credentials on the board and have it join. ASKS A HUMAN FIRST — blocks '
         + 'until Approve, refused on Hold. The radio is 2.4 GHz only. The reply is what the '
@@ -571,6 +584,7 @@ function writeTools(fx) {
 
     {
       name: 'submit_work_order',
+      title: "Hand a goal to the page's own build loop",
       description:
         'Hand a goal in plain language to the page\'s own build loop and let it run. The loop '
         + 'searches configurations against the board and records attempts in the same log as '
@@ -797,26 +811,56 @@ function seen(input) {
  * @param {object} opts
  *   fx            effectors: setCamera, setConfig, flash, provision,
  *                 submitWorkOrder, manifest, source
- *   modelContext  the registry; defaults to document.modelContext
+ *   modelContext  the registry; defaults to document.modelContext, then to
+ *                 navigator.modelContext
  *   quietMs       how long since the last call counts as gone quiet
  * @returns {{ available, dispose, names }}
  */
 export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
-  const mc = modelContext ?? globalThis.document?.modelContext ?? null;
+  /* The standard hangs the registry on the document. It hung it on navigator
+     first, and a browser still shipping it there has an agent in it all the
+     same — this page would rather be found by that agent than be right about
+     where to look. */
+  const mc = modelContext
+    ?? globalThis.document?.modelContext
+    ?? globalThis.navigator?.modelContext
+    ?? null;
+
+  const reads = readTools(fx);
+  const writes = writeTools(fx);
+  const registered = new Set();
+
+  /* What the panel draws: every tool the page offers, and whether each one is
+     registered at this moment. Published on every change to the registry, and
+     once even when there is no registry, so a person can see what an agent
+     would get before opening the page somewhere one can. */
+  const publish = () => applyAgent({
+    tools: [...reads, ...writes].map(t => ({
+      name: t.name,
+      title: t.title || t.name,
+      readOnly: !!t.annotations?.readOnlyHint,
+      registered: registered.has(t.name),
+    })),
+  });
 
   if (!mc || typeof mc.registerTool !== 'function') {
     /* The page works exactly as it does without an agent, and says once,
        quietly, that there is more to be had. */
     applyAgent({ available: false });
+    publish();
     return { available: false, names: () => [], dispose() {} };
   }
   applyAgent({ available: true });
 
-  const registered = new Set();
   let quietTimer = 0;
 
   /* Presence, inferred from calls. Wrapped once here so no tool has to
-     remember to report itself. */
+     remember to report itself.
+
+     The result goes back as an object. The registry serialises it itself —
+     executeTool hands the agent a JSON string made from whatever execute
+     resolved with — so a string returned here would be serialised a second
+     time, and the model would be reading escaped quotes. */
   const wrap = tool => ({
     ...tool,
     execute: async (input, ctx = {}) => {
@@ -832,7 +876,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
         applyAgent({ tool: null, lastAt: Date.now() });
         quietTimer = setTimeout(() => applyAgent({ quiet: true }), quietMs);
       }
-      return JSON.stringify(envelope(fx, result));
+      return envelope(fx, result);
     },
   });
 
@@ -842,10 +886,11 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
       registered.add(t.name);
       signal.addEventListener('abort', () => registered.delete(t.name), { once: true });
     }
+    publish();
   };
 
   const readCtl = new AbortController();
-  register(readTools(fx), readCtl.signal);
+  register(reads, readCtl.signal);
 
   /* Write tools follow the link. Registered on linked, withdrawn on anything
      else, so the agent is never offered a lever with nothing on the end. */
@@ -854,10 +899,11 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
     const on = s.device.link === 'linked';
     if (on && !writeCtl) {
       writeCtl = new AbortController();
-      register(writeTools(fx), writeCtl.signal);
+      register(writes, writeCtl.signal);
     } else if (!on && writeCtl) {
       writeCtl.abort();
       writeCtl = null;
+      publish();
     }
   };
   sync(state);
@@ -872,6 +918,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
       readCtl.abort();
       writeCtl?.abort();
       writeCtl = null;
+      publish();
     },
   };
 }
