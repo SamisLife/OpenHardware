@@ -24,6 +24,7 @@
 
 #include "hw.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -44,6 +45,113 @@ static char s_boot_id[9];
 static char s_mac[18];
 static char s_sha[17];
 static char s_fw[32];
+
+static void activate_restart_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_restart();
+}
+
+static bool same_sha8(const esp_app_desc_t *desc, const char *expected)
+{
+    if (!desc || !expected || strlen(expected) != 16) return false;
+    char actual[17];
+    for (int i = 0; i < 8; i++) {
+        snprintf(actual + i * 2, 3, "%02x", desc->app_elf_sha256[i]);
+    }
+    actual[16] = '\0';
+    for (int i = 0; i < 16; i++) {
+        if (actual[i] != (char)tolower((unsigned char)expected[i])) return false;
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------------------ */
+/* the image the bootloader chose, and whether it will keep it              */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * What the bootloader thinks of the running image.
+ *
+ * With rollback enabled, an image selected with esp_ota_set_boot_partition
+ * boots exactly once as "pending" and is abandoned on the next reset unless
+ * the running firmware confirms it. That reset arrives sooner than it looks:
+ * opening the serial port resets this board, so the page that just wrote a
+ * candidate and reopens the port to watch it boot would, on its own, be the
+ * thing that rolled it back. Reported in every hello so the far end never
+ * has to guess which of those happened.
+ */
+static const char *ota_state_str(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) return "unknown";
+    if (running->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) return "factory";
+
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) != ESP_OK) return "unknown";
+    switch (st) {
+        case ESP_OTA_IMG_NEW:            return "new";
+        case ESP_OTA_IMG_PENDING_VERIFY: return "pending";
+        case ESP_OTA_IMG_VALID:          return "valid";
+        case ESP_OTA_IMG_INVALID:        return "invalid";
+        case ESP_OTA_IMG_ABORTED:        return "aborted";
+        default:                         return "undefined";
+    }
+}
+
+/**
+ * An OTA slot the bootloader gave up on, or NULL.
+ *
+ * A candidate that never confirmed itself is marked aborted in otadata and the
+ * previous image is booted instead. That mark is the only trace the rollback
+ * leaves, so it travels in the hello: a page that just activated ota_0 and
+ * hears "factory, aborted ota_0" knows exactly what happened, rather than
+ * being left with a board that quietly runs something else.
+ */
+static const char *aborted_slot(void)
+{
+    static const char *labels[] = { "ota_0", "ota_1" };
+    const esp_partition_t *running = esp_ota_get_running_partition();
+
+    for (int i = 0; i < 2; i++) {
+        const esp_partition_t *p = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, labels[i]);
+        if (!p || p == running) continue;
+        esp_ota_img_states_t st;
+        if (esp_ota_get_state_partition(p, &st) == ESP_OK && st == ESP_OTA_IMG_ABORTED) {
+            return labels[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Keep this image.
+ *
+ * Called the moment the wire and the heartbeat are up, before the camera and
+ * before the application layer, because what rollback guards against is an
+ * image that cannot report — and by this line it demonstrably can. An
+ * application that crashes is contained by its own counter in hw_app.c and
+ * stays visible in every hello; it is not a reason to lose the harness that
+ * is reporting it. A factory image has nothing to confirm.
+ */
+static void confirm_image(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (!running || esp_ota_get_state_partition(running, &st) != ESP_OK) return;
+    if (st != ESP_OTA_IMG_PENDING_VERIFY && st != ESP_OTA_IMG_NEW) return;
+
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "%s confirmed; the bootloader will keep it", running->label);
+        hw_proto_status("image_valid", running->label);
+    } else {
+        ESP_LOGW(TAG, "could not confirm %s: %s", running->label, esp_err_to_name(err));
+        hw_proto_status("image_unconfirmed", esp_err_to_name(err));
+    }
+}
 
 /* ------------------------------------------------------------------------ */
 /* identity                                                                  */
@@ -177,7 +285,17 @@ static void send_hello(void)
 
     char opt[96] = {0};
     int used = opt_f(opt, sizeof opt, 0, "temp_c", have_temp, temp);
-    opt_s(opt, sizeof opt, used, "ip", have_ip, ip);
+    used = opt_s(opt, sizeof opt, used, "ip", have_ip, ip);
+    /* The slot the bootloader abandoned, when there is one. Absent otherwise:
+       a rollback that did not happen must not travel as an empty string. */
+    const char *aborted = aborted_slot();
+    opt_s(opt, sizeof opt, used, "aborted", aborted != NULL, aborted);
+
+    char app_crashes[32] = {0};
+    if (strcmp(hw_app_state_str(), "disabled") == 0) {
+        snprintf(app_crashes, sizeof app_crashes, ",\"crashes\":%u",
+                 (unsigned)hw_app_crash_tries());
+    }
 
     /* `net` is always present because the state is always known — a board with
        no radio brought up is "offline", which is a fact rather than a missing
@@ -188,7 +306,9 @@ static void send_hello(void)
         "\"mac\":\"%s\",\"boot_id\":\"%s\",\"reset\":\"%s\","
         "\"provisioned\":%s,\"ssid\":\"%s\",\"net\":\"%s\","
         "\"psram\":%lu,\"flash\":%lu,\"heap\":%lu,\"heap_total\":%lu,"
-        "\"temp_crit_c\":85,\"rx\":%lu%s",
+        "\"temp_crit_c\":85,\"rx\":%lu,"
+        "\"ota\":\"%s\","
+        "\"app\":{\"name\":\"%s\",\"ver\":\"%s\",\"state\":\"%s\"%s}%s",
         HW_PROTO_VERSION, s_fw, s_sha,
         running ? running->label : "unknown",
         HW_BOARD_ID, HW_BOARD_NAME,
@@ -200,6 +320,8 @@ static void send_hello(void)
         (unsigned long)hw_sensors_heap_free(),
         (unsigned long)hw_sensors_heap_total(),
         (unsigned long)hw_proto_rx_bytes(),
+        ota_state_str(),
+        hw_app_name(), hw_app_version(), hw_app_state_str(), app_crashes,
         opt);
 }
 
@@ -219,11 +341,13 @@ static void send_caps(void)
 {
     hw_proto_sendf("caps",
         "\"camera\":{\"state\":\"%s\",\"sensor\":\"%s\"},"
-        "\"psram\":%lu,\"flash\":%lu,\"streaming\":%s",
+        "\"psram\":%lu,\"flash\":%lu,\"streaming\":%s,"
+        "\"cfg\":true,\"config\":{\"size\":\"%s\",\"quality\":%d}",
         hw_camera_state_str(), hw_camera_sensor(),
         (unsigned long)hw_sensors_psram_size(),
         (unsigned long)hw_sensors_flash_size(),
-        hw_camera_streaming() ? "true" : "false");
+        hw_camera_streaming() ? "true" : "false",
+        hw_camera_size_name(), hw_camera_quality());
 }
 
 /* ------------------------------------------------------------------------ */
@@ -261,6 +385,56 @@ static void on_frame(const char *type, const char *json)
 
         hw_camera_set_streaming(want);
         hw_proto_sendf("cam_ack", "\"on\":%s", want ? "true" : "false");
+        return;
+    }
+
+    if (strcmp(type, "cfg") == 0) {
+        char size[12] = {0};
+        int quality = hw_camera_quality();
+        hw_json_int(json, "quality", &quality);
+
+        if (!hw_json_str(json, "size", size, sizeof(size))
+            || !hw_camera_request_config(size, quality)) {
+            hw_proto_sendf("cfg_ack",
+                "\"ok\":false,\"err\":\"ESP_ERR_INVALID_ARG\"");
+        }
+        return;
+    }
+
+    /* Candidate bytes are written to an inactive OTA partition by the cable
+       flasher. The running harness validates the image and its expected ELF
+       identity before selecting it, so an interrupted write leaves the
+       current image and the factory baseline selected exactly as they were. */
+    if (strcmp(type, "activate") == 0) {
+        char slot[12] = {0}, expected[17] = {0};
+        if (!hw_json_str(json, "slot", slot, sizeof(slot))
+            || !hw_json_str(json, "sha", expected, sizeof(expected))
+            || (strcmp(slot, "ota_0") != 0 && strcmp(slot, "ota_1") != 0)) {
+            hw_proto_sendf("activate_ack", "\"ok\":false,\"err\":\"invalid target\"");
+            return;
+        }
+
+        const esp_partition_t *target = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, slot);
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_app_desc_t desc = {0};
+        esp_err_t err = target ? esp_ota_get_partition_description(target, &desc) : ESP_ERR_NOT_FOUND;
+        if (err == ESP_OK && target == running) err = ESP_ERR_INVALID_STATE;
+        if (err == ESP_OK && !same_sha8(&desc, expected)) err = ESP_ERR_INVALID_CRC;
+        if (err == ESP_OK) err = esp_ota_set_boot_partition(target);
+        if (err != ESP_OK) {
+            hw_proto_sendf("activate_ack", "\"ok\":false,\"err\":\"%s\"",
+                           esp_err_to_name(err));
+            return;
+        }
+
+        if (xTaskCreate(activate_restart_task, "hw_activate", 2048, NULL, 8, NULL) != pdPASS) {
+            esp_ota_set_boot_partition(running);
+            hw_proto_sendf("activate_ack", "\"ok\":false,\"err\":\"no restart task\"");
+            return;
+        }
+        hw_proto_sendf("activate_ack", "\"ok\":true,\"slot\":\"%s\",\"sha\":\"%s\"",
+                       slot, expected);
         return;
     }
 
@@ -378,10 +552,13 @@ static void beat_task(void *arg)
         used = opt_f(opt, sizeof opt, used, "fps", have_fps, fps);
         opt_d(opt, sizeof opt, used, "rssi", have_rssi, rssi);
 
+        char app[400] = {0};
+        hw_app_beat_json(app, sizeof app);
+
         hw_proto_sendf("beat",
             "\"uptime_s\":%.2f,\"heap_free\":%lu,\"psram_free\":%lu,"
             "\"psram_largest\":%lu,\"cpu_mhz\":%d,\"boot_id\":\"%s\","
-            "\"net\":\"%s\"%s",
+            "\"net\":\"%s\",%s%s",
             (double)esp_timer_get_time() / 1000000.0,
             (unsigned long)hw_sensors_heap_free(),
             (unsigned long)hw_sensors_psram_free(),
@@ -389,6 +566,7 @@ static void beat_task(void *arg)
             hw_sensors_cpu_mhz(),
             s_boot_id,
             hw_net_state_str(),
+            app,
             opt);
 
         vTaskDelayUntil(&next, pdMS_TO_TICKS(HW_BEAT_MS));
@@ -424,6 +602,11 @@ static void camera_task(void *arg)
     hw_camera_probe();
     send_caps();
 
+    /* The app never runs while the camera probe counter is armed. A panic in
+       app_setup must be attributed to the app rather than carried into the
+       next boot as evidence against the sensor. */
+    hw_app_start();
+
     uint32_t seq = 0;
     int64_t last_frame = 0;
     int64_t last_watch = 0;
@@ -431,6 +614,19 @@ static void camera_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(HW_CAM_TICK_MS));
         const int64_t now = esp_timer_get_time() / 1000;
+
+        const char *config_err = NULL;
+        const int configured = hw_camera_apply_pending(&config_err);
+        if (configured > 0) {
+            hw_proto_sendf("cfg_ack",
+                "\"ok\":true,\"size\":\"%s\",\"quality\":%d",
+                hw_camera_size_name(), hw_camera_quality());
+            send_caps();
+            hw_camera_drain_frames();
+        } else if (configured < 0) {
+            hw_proto_sendf("cfg_ack", "\"ok\":false,\"err\":\"%s\"",
+                           config_err ? config_err : "ESP_FAIL");
+        }
 
         /* Arrival and removal, on their own slower clock than the tick. Told
            to the host only when something changed: a `caps` every second
@@ -464,6 +660,10 @@ void app_main(void)
     esp_err_t err = hw_prov_init();
     if (err != ESP_OK) ESP_LOGE(TAG, "nvs unavailable: %s", esp_err_to_name(err));
 
+    /* The request mailbox must exist before the RX task can accept a cfg
+       frame. This allocates no camera resource and makes no sensor call. */
+    hw_camera_init();
+
     /* 2. The channel, before anything that might need to report a problem.
        Not ESP_ERROR_CHECK: that aborts, and an abort here is a boot loop with
        nothing on the wire to say why — the one failure this firmware is built
@@ -479,6 +679,7 @@ void app_main(void)
     read_build();
     hw_sensors_init();
     hw_prov_load(&s_creds);
+    hw_app_init();
 
     ESP_LOGI(TAG, "openhardware %s (%s) on %s", s_fw, s_sha, HW_BOARD_NAME);
     ESP_LOGI(TAG, "boot %s, reset %s, %lu KB psram, %d MHz",
@@ -491,6 +692,7 @@ void app_main(void)
     xTaskCreate(beat_task, "hw_beat", 4096, NULL, 5, NULL);
 
     hw_proto_status("ready", "reporting over USB");
+    confirm_image();
 
     /* Below the line: everything that can fail. It runs at a lower priority
        than the heartbeat, on its own stack, and it starts by waiting — so the

@@ -91,6 +91,17 @@ export const state = {
     /** epoch ms of the last heartbeat seen */
     lastSeen: 0,
     firmware: { version: null, sha: null, slot: null, builtAt: 0 },
+    /** identity and health reported by the replaceable application layer */
+    app: null,
+    appState: null,
+    appLoops: null,
+    bootId: null,
+    reset: null,
+    reboots: 0,
+    /** 'factory' | 'pending' | 'valid' | 'aborted' | ... as the bootloader sees the running image */
+    ota: null,
+    /** an OTA slot the bootloader abandoned, or null */
+    aborted: null,
   },
 
   /* ---- devices/{id}/telemetry ------------------------------------------ */
@@ -394,7 +405,15 @@ export function pushGap(t, label) {
   const buf = state.telemetry.buffer;
   const last = buf[buf.length - 1];
   if (last && last.gap) {
-    if (!last.label && label) { last.label = label; touch('telemetry'); }
+    if (!last.label && label) {
+      last.label = label;
+      touch('telemetry');
+    } else if (label?.startsWith('REBOOT') && !last.label.includes(label)) {
+      /* A native-USB reset closes the port before the next hello explains it.
+         Keep the first observation and append the later reset evidence. */
+      last.label = `${last.label} · ${label}`;
+      touch('telemetry');
+    }
     return;
   }
 
@@ -509,8 +528,7 @@ export function applyGate(doc) {
  */
 export function resetAttempts() {
   state.attempts = [];
-  state.firmware = [];
-  touch('attempts', 'firmware');
+  touch('attempts');
 }
 
 /** Start over. Used when a source hands off to another one. */
@@ -526,11 +544,18 @@ export function resetAll() {
   };
   state.peripherals = {
     known: false, camera: null, i2c: [], streaming: false, cameraAsked: false,
+    streamWanted: false, cfg: false, config: null, cfgError: null,
   };
   state.firmware = [];
   state.workOrder = null;
   state.attempts = [];
   state.device.link = 'offline';
   state.device.lastSeen = 0;
+  state.device.app = null;
+  state.device.appState = null;
+  state.device.appLoops = null;
+  state.device.bootId = null;
+  state.device.reset = null;
+  state.device.reboots = 0;
   renderAll();
 }

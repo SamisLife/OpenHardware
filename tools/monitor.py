@@ -388,6 +388,9 @@ class Watch:
         self.asked_cam = False
         self.cam_ack = None
         self.cam_err = None
+        self.app_identity = None
+        self.app_state = None
+        self.app_beat_seen = False
 
     # ---- boots ----------------------------------------------------------
 
@@ -427,10 +430,21 @@ class Watch:
                 # Said once per boot rather than every 700 ms. Which image is
                 # running is the first thing to establish and the last thing
                 # worth repeating.
-                self.out.line('meta', '   fw %s · sha %s · slot %s · %s · psram %s · heap %s of %s'
+                self.out.line('meta', '   fw %s · sha %s · slot %s%s · %s · psram %s · heap %s of %s'
                               % (f.get('fw', '?'), f.get('sha', '?'), f.get('slot', '?'),
+                                 (' (%s)' % f['ota']) if f.get('ota') else '',
                                  f.get('mac', '?'), fmt(f.get('psram')),
                                  fmt(f.get('heap')), fmt(f.get('heap_total'))))
+                app = f.get('app')
+                if isinstance(app, dict):
+                    self.app_identity = (app.get('name'), app.get('ver'))
+                    self.app_state = app.get('state')
+                    crashes = app.get('crashes')
+                    self.out.line('meta', '   app %s %s · %s%s'
+                                  % (app.get('name', '?'), app.get('ver', '?'),
+                                     app.get('state', 'unreported'),
+                                     ' · %s crash boots' % crashes
+                                     if crashes is not None else ''))
             return
 
         if t == 'beat':
@@ -455,6 +469,25 @@ class Watch:
             self.cam_err = f.get('err') or None
             self.out.line('frame', '< cam_ack on=%s%s'
                           % (self.cam_ack, ' · %s' % self.cam_err if self.cam_err else ''))
+            return
+
+        if t == 'cfg_ack':
+            self.out.line('frame', '< cfg_ack ok=%s%s%s'
+                          % (bool(f.get('ok')),
+                             ' · %s q%s' % (f.get('size'), f.get('quality'))
+                             if f.get('ok') else '',
+                             ' · %s' % f.get('err') if f.get('err') else ''))
+            return
+
+        if t == 'activate_ack':
+            self.out.line('frame', '< activate_ack ok=%s%s%s' % (
+                f.get('ok'),
+                ' slot=%s' % f.get('slot') if f.get('slot') else '',
+                ' err=%s' % f.get('err') if f.get('err') else ''))
+            return
+
+        if t == 'log' and f.get('src') == 'app':
+            self.out.line('frame', '   app: %s' % (f.get('msg') or ''))
             return
 
         if t == 'status':
@@ -496,6 +529,21 @@ class Watch:
             self.uptime = up
         self.last_beat = now
         self.beats += 1
+
+        app = b.get('app')
+        if isinstance(app, dict):
+            state = app.get('state')
+            metrics = app.get('m') if isinstance(app.get('m'), dict) else {}
+            first = not self.app_beat_seen
+            changed = state != self.app_state
+            self.app_state = state
+            self.app_beat_seen = True
+            if first or changed or self.show_beats:
+                rendered = ', '.join('%s=%s' % (k, fmt(v))
+                                     for k, v in sorted(metrics.items()))
+                self.out.line('text', '   app %s · loops=%s%s'
+                              % (state or 'unreported', fmt(app.get('loops')),
+                                 ' · ' + rendered if rendered else ''))
 
         if self.show_beats:
             self.out.line('text', '   beat up=%s heap=%s psram=%s temp=%s fps=%s'
@@ -780,6 +828,10 @@ def main():
 
     p.add_argument('--cam', action='store_true',
                    help='turn the camera on, then count the pictures that arrive')
+    p.add_argument('--cfg', metavar='SIZE',
+                   help='set QQVGA, QVGA, CIF, HVGA, VGA, SVGA, XGA, HD, SXGA or UXGA')
+    p.add_argument('--quality', type=int, metavar='N',
+                   help='JPEG quality for --cfg (10..63); omitted uses the running value')
     p.add_argument('--prov', metavar='SSID',
                    help='hand the board this network, then watch it join')
     p.add_argument('--psk', metavar='PASSPHRASE',
@@ -790,7 +842,15 @@ def main():
                    help='optional device API base URL, stored alongside the network')
     args = p.parse_args()
 
+    if args.quality is not None and not args.cfg:
+        p.error('--quality requires --cfg')
+
     outbound = []
+    if args.cfg:
+        config = {'t': 'cfg', 'size': args.cfg.upper()}
+        if args.quality is not None:
+            config['quality'] = args.quality
+        outbound.append(config)
     if args.cam:
         outbound.append({'t': 'cam', 'on': True})
 

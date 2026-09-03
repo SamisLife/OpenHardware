@@ -25,6 +25,7 @@ import { clock } from '../format.js';
 /** Requests worth making, phrased for an agent rather than for a parser. */
 export const ASK = [
   'What board is attached, and is its camera working?',
+  'Write an app that reads the camera at HVGA and reports frame time as a metric, build it, and ask me to flash it.',
   'Find the largest frame size this camera holds at 10 fps or better, and record it as a limit.',
   'Watch the die temperature for a minute and tell me whether it is climbing.',
 ];

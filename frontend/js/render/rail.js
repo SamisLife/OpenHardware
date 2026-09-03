@@ -28,6 +28,7 @@ export function mountRail(root) {
     net: root.querySelector('[data-rail=net]'),
     fw: root.querySelector('[data-rail=fw]'),
     sha: root.querySelector('[data-rail=sha]'),
+    app: root.querySelector('[data-rail=app]'),
     slot: root.querySelector('[data-rail=slot]'),
     link: root.querySelector('[data-rail=link]'),
     linkText: root.querySelector('[data-rail=link-text]'),
@@ -47,6 +48,9 @@ export function renderRail(state) {
   set(el.net, d.ip && d.ssid ? `${d.ssid} · ${d.ip}` : d.ssid || null);
   set(el.fw, d.firmware.version);
   set(el.sha, d.firmware.sha ? d.firmware.sha.slice(0, 7) : null);
+  set(el.app, d.app?.name
+    ? `${d.app.name}${d.app.ver ? ` ${d.app.ver}` : ''}${d.appState ? ` · ${d.appState}` : ''}`
+    : null);
   set(el.slot, d.firmware.slot);
 
   el.link.dataset.state = d.link;

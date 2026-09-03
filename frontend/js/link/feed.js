@@ -27,7 +27,7 @@
 
 import {
   state,
-  applyDevice, applyFrame, applyLimits, applyPeripherals, applyUi,
+  applyDevice, applyFirmware, applyFrame, applyLimits, applyPeripherals, applyUi,
   pushTelemetry, pushGap,
 } from '../state.js';
 
@@ -63,7 +63,9 @@ const FRAME_STALE_MS = 6000;
  *   label      what to show on the source badge
  * @returns {{ handleFrame, handleText, stop, fresh }}
  */
-export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_STALE_MS, ask = null } = {}) {
+export function createFeed({
+  onLost = null, onLog = null, source = null, frameStaleMs = FRAME_STALE_MS, ask = null,
+} = {}) {
   let watchdog = 0;
   let frameWatch = 0;
   let lastLink = null;
@@ -96,6 +98,7 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
       case 'img': return beginImage(frame);
       case 'imgd': return addChunk(frame);
       case 'status': return onStatus(frame);
+      case 'log': return onLog?.({ src: frame.src || null, msg: frame.msg || '' });
       default: return;
     }
   }
@@ -112,6 +115,12 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
   /* ---- identity -------------------------------------------------------- */
 
   function onHello(h) {
+    const bootId = h.boot_id || null;
+    const previousBoot = state.device.bootId;
+    if (bootId && previousBoot && bootId !== previousBoot) {
+      pushGap(Date.now(), `REBOOT · ${h.reset || 'UNKNOWN'}`);
+    }
+
     const patch = {
       id: h.device_id || idFromMac(h.mac),
       board: h.board_name || h.board || null,
@@ -119,6 +128,16 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
       mac: h.mac || null,
       link: 'linked',
       firmware: { version: h.fw || null, sha: h.sha || null, slot: h.slot || null },
+      app: h.app && typeof h.app === 'object'
+        ? { name: h.app.name || null, ver: h.app.ver || null } : null,
+      appState: h.app?.state || null,
+      bootId,
+      reset: h.reset || null,
+      /* The bootloader's view of the running image, and any slot it gave up
+         on. Both are facts the board holds and the page cannot infer. */
+      ota: h.ota || null,
+      aborted: h.aborted || null,
+      reboots: state.device.reboots + (bootId && previousBoot && bootId !== previousBoot ? 1 : 0),
     };
     /* Only what the frame carried. A hello that says nothing about the network
        must not blank an address another transport reported. */
@@ -133,6 +152,23 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
     if (Number.isFinite(h.heap_total)) limits.heapTotal = h.heap_total;
     if (Number.isFinite(h.temp_crit_c)) limits.tempCritC = h.temp_crit_c;
     if (Object.keys(limits).length) applyLimits(limits);
+
+    const runningSha = String(h.sha || '').toLowerCase();
+    const activating = runningSha && state.firmware.some(row =>
+      row.outcome === 'built' && String(row.sha || '').toLowerCase() === runningSha);
+    if (activating) {
+      applyFirmware(state.firmware.map(row => {
+        const outcome = row.outcome;
+        const same = String(row.sha || '').toLowerCase() === runningSha;
+        if (same && ['built', 'active', 'superseded'].includes(outcome)) {
+          return { ...row, outcome: 'active', slot: h.slot || row.slot || null };
+        }
+        if (!same && ['built', 'active'].includes(outcome)) {
+          return { ...row, outcome: 'superseded' };
+        }
+        return row;
+      }));
+    }
 
     kick();
   }
@@ -159,7 +195,7 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
       applyUi({ label: '' });
     }
 
-    pushTelemetry({
+    const sample = {
       t: now,
       uptimeS: num(b.uptime_s),
       tempC: num(b.temp_c),
@@ -169,7 +205,21 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
       rssi: num(b.rssi),
       cpuMhz: num(b.cpu_mhz),
       fps: num(b.fps),
-    });
+    };
+    if (b.app?.m && typeof b.app.m === 'object') {
+      for (const [key, value] of Object.entries(b.app.m)) {
+        const n = Number(value);
+        if (/^[a-z0-9_]{1,16}$/.test(key) && Number.isFinite(n)) sample[`app.${key}`] = n;
+      }
+    }
+    pushTelemetry(sample);
+
+    if (b.app && typeof b.app === 'object') {
+      applyDevice({
+        appState: b.app.state || null,
+        appLoops: Number.isFinite(Number(b.app.loops)) ? Number(b.app.loops) : null,
+      });
+    }
 
     kick();
   }
@@ -227,6 +277,10 @@ export function createFeed({ onLost = null, source = null, frameStaleMs = FRAME_
   function onStatus(frame) {
     if (frame.stage === 'camera_absent' || frame.stage === 'camera_faulted') {
       dropImage(frame.detail || 'The camera is not available.');
+    }
+    if (frame.stage === 'frame_too_large') {
+      if (!state.frame.kind && state.frame.verdict?.includes('cable budget')) return;
+      dropImage(frame.detail || 'The frame was larger than the cable budget.');
     }
   }
 

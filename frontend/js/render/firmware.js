@@ -3,11 +3,9 @@
    ----------------------------------------------------------------------------
    Two lists that belong together.
 
-   The image history is the audit trail: every build that reached the device
-   and what became of it. A failed flash is a normal entry here, not an error
-   state — the whole design assumes images will fail and that the bootloader
-   will put the last good one back. Showing rollbacks as ordinary rows is the
-   point.
+   The image history is the audit trail: every local build, whether it reached
+   the device, and what became of it. A failed build is a normal entry here;
+   active means a later hello reported the exact ELF hash.
 
    Below it, procedural memory: the board-specific limits the agent has
    worked out by running into them. These outlive the work order and narrow
@@ -18,16 +16,13 @@
 import { clock, NIL } from '../format.js';
 
 const OUTCOME = {
+  built:       { label: 'BUILT',       tone: 'ok' },
   flashing:    { label: 'FLASHING',    tone: 'warn' },
   active:      { label: 'ACTIVE',      tone: 'active' },
   held:        { label: 'HELD',        tone: 'ok' },
   failed:      { label: 'FAILED',      tone: 'fault' },
   rolled_back: { label: 'ROLLED BACK', tone: 'warn' },
   superseded:  { label: 'SUPERSEDED',  tone: 'muted' },
-  /* A configuration the agent chose but that was never built or written. It
-     belongs in the history — it is what was decided — but it must not sit in
-     the same column as an image that actually reached the board. */
-  simulated:   { label: 'NOT BUILT',   tone: 'muted' },
 };
 
 let el = {};

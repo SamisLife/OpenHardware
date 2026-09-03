@@ -111,7 +111,7 @@ def main():
         shutil.copyfile(src, dst)
 
         data = open(dst, 'rb').read()
-        parts.append({
+        part = {
             'path': name,
             'offset': int(offset_s, 16),
             'size': len(data),
@@ -120,11 +120,13 @@ def main():
             # browser without shipping an implementation to do it — and an
             # image nobody can verify is one nobody can say arrived intact.
             'sha256': hashlib.sha256(data).hexdigest(),
-        })
+        }
 
         desc = read_app_desc(dst)
         if desc:
             described = desc
+            part['role'] = 'application'
+        parts.append(part)
 
     if described is None:
         sys.exit('none of the built images carries an app descriptor')

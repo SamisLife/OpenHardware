@@ -22,7 +22,7 @@
 
 import {
   state, subscribe, renderAll, applyPeripherals, applyUi,
-  applyWorkOrder, resetAttempts,
+  applyFirmware, applyWorkOrder, resetAttempts,
 } from './state.js';
 import { mountStrip } from './strip.js';
 import { mountRail, renderRail } from './render/rail.js';
@@ -35,13 +35,13 @@ import {
 import { mountAgent, renderWorkOrder, renderAttempts, renderGate } from './render/agent.js';
 import { mountBelt, renderBelt } from './render/belt.js';
 import { mountFirmware, renderFirmware, renderMemory } from './render/firmware.js';
-import { startBuild } from './builder/run.js';
-import { parseObjective } from './builder/objective.js';
 import { approvePending, holdPending } from './builder/gate.js';
 import { mountTools, configEffector } from './webmcp.js';
 import { fetchManifest } from './link/flash.js';
+import { createBuildClient } from './link/build.js';
 import { clock } from './format.js';
 import { Session } from './onboard/session.js';
+import { describeBringUp } from './onboard/guide.js';
 import { webSerialDriver, simulatedDriver } from './link/drivers.js';
 import { createFeed } from './link/feed.js';
 
@@ -144,7 +144,11 @@ subscribe((s, changed) => {
      no second copy to fall out of step. */
   if (changed.has('attempts')) { renderAttempts(s); renderMemory(s); }
   if (changed.has('memory')) renderMemory(s);
-  if (changed.has('gate')) renderGate(s);
+  if (changed.has('gate')) {
+    renderGate(s);
+    renderSource(s);
+    if (s.gate?.state === 'pending') announce('Agent waiting for approval.');
+  }
   if (changed.has('firmware')) renderFirmware(s);
   if (changed.has('ui')) { renderSource(s); renderBelt(s); }
   narrate(s, changed);
@@ -190,7 +194,10 @@ function renderSource(s) {
      never in the colour, because a model calling tools against a simulated
      board is still looking at a simulation. */
   badge.dataset.live = String(src === 'usb' || src === 'server');
-  note.textContent = [s.ui.label || '', presenceLine(s.ui.agent)].filter(Boolean).join(' · ');
+  note.textContent = [
+    s.ui.label || '',
+    s.gate?.state === 'pending' ? 'Agent waiting for approval.' : presenceLine(s.ui.agent),
+  ].filter(Boolean).join(' · ');
 }
 
 /**
@@ -235,6 +242,28 @@ function narrate(s, changed) {
 const params = new URLSearchParams(location.search);
 const scene = params.get('sim');
 const simulated = scene !== null;
+const buildClient = createBuildClient({
+  base: params.get('buildd') || 'http://127.0.0.1:8001',
+});
+buildClient.list().then(result => {
+  if (!result.ok || !Array.isArray(result.builds)) return;
+  const restored = result.builds.map(record => ({
+    buildId: record.id,
+    version: record.image?.version || null,
+    sha: record.image?.elf_sha8 || null,
+    bytes: record.image?.total_bytes ?? null,
+    builtAt: Date.parse(record.endedAt || record.startedAt || '') || 0,
+    slot: null,
+    outcome: record.status === 'built' ? 'built' : 'failed',
+    note: record.status === 'built'
+      ? [`app ${record.app?.name || 'unknown'} ${record.app?.version || ''}`.trim(),
+         record.image?.activation_protocol === 2 ? '' : 'legacy artifact · rebuild before OTA flash']
+          .filter(Boolean).join(' · ')
+      : record.diagnostics?.[0]?.message || 'build failed',
+  }));
+  const known = new Set(restored.map(row => row.buildId));
+  applyFirmware([...state.firmware.filter(row => !known.has(row.buildId)), ...restored]);
+});
 
 let session = null;
 let feed = null;
@@ -346,49 +375,10 @@ function goLive(s) {
 /* the agent                                                                 */
 /* ------------------------------------------------------------------------ */
 
-/** The run currently working against the attached board, or null. */
-let build = null;
-
-/**
- * Put the local loop to work against whatever is plugged in.
- *
- * Two effectors are handed over, and they are the same two the agent's tools
- * use: `cam` turns capture on so a frame rate can be measured, and `cfg`
- * applies a configuration at runtime on a board that accepts one. Every step
- * the run narrates that it did not really perform is marked as such and drawn
- * differently.
- *
- * The seam is WebMCP tools. An agent in the browser drives the board through
- * run_experiment and the rest, writing to the same attempts this loop writes
- * to; this loop is what advances the work order when no agent is calling.
- * Nothing in builder/run.js changes shape either way.
- *
- * @returns {{ok: boolean, error?: string}} so a tool that submits a goal can
- *          report a refusal rather than a silent no-op.
- */
-function startWorkOrder(goal) {
-  const o = parseObjective(goal);
-  if (!o.ok) {
-    return { ok: false, error: 'the goal has nothing measurable in it — name a frame-rate '
-                              + 'floor, a temperature ceiling, a memory reserve, or something to maximise' };
-  }
-  build?.stop();
-  build = startBuild({
-    goal,
-    setCamera: on => setCamera(on),
-    setConfig,
-    onDone: () => announce('The work order finished.'),
-  });
-  announce('Work order submitted. The loop is working.');
-  return { ok: true };
-}
-
 function abandonBuild() {
-  build?.stop();
-  build = null;
   applyWorkOrder(null);
   resetAttempts();
-  announce('Work order abandoned.');
+  announce('Work order cleared.');
 }
 
 /* ------------------------------------------------------------------------ */
@@ -408,11 +398,28 @@ mountTools({
   fx: {
     setCamera: on => setCamera(on),
     setConfig,
-    flash: opts => session?.flash(opts),
+    flash: async opts => {
+      await session?.flash({
+        eraseAll: false,
+        imageBase: opts?.imageBase || buildClient.baselineBase,
+      });
+      if (session?.state.phase === 'decide') await session.skipNetwork();
+      const s = session?.state;
+      return {
+        phase: s?.phase || null,
+        fault: s?.fault || null,
+        flashDone: s?.rungs?.flash?.state === 'done',
+      };
+    },
     provision: (ssid, psk) => session?.provision(ssid, psk),
-    submitWorkOrder: goal => startWorkOrder(goal),
-    manifest: () => fetchManifest(),
+    manifest: () => session?.driver?.fetchManifest?.() || fetchManifest(),
+    build: buildClient,
+    wireTail: lines => (session?.monitor || []).slice(-lines).map(row => ({
+      t: row.t, kind: row.kind, text: row.n > 1 ? `${row.text} ×${row.n}` : row.text,
+    })),
     source: () => (simulated ? 'sim' : 'usb'),
+    /* Where bring-up stands, for a caller that cannot see the ladder. */
+    bringUp: () => (session ? describeBringUp(session.state) : null),
   },
 });
 

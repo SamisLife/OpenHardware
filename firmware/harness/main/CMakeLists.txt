@@ -6,12 +6,14 @@ idf_component_register(
     "hw_sensors.c"
     "hw_camera.c"
     "hw_net.c"
+    "hw_app.c"
   INCLUDE_DIRS "."
   REQUIRES
     nvs_flash esp_psram app_update esp_timer esp_system spi_flash esp_partition
     esp_driver_usb_serial_jtag driver vfs esp_hw_support
     esp_wifi esp_netif esp_event lwip
     espressif__esp32-camera
+    app hw_app_api
 )
 
 # esp_driver_i2c is deliberately absent from that list, and this is not a
@@ -42,8 +44,10 @@ idf_component_register(
 # its _LEGACY sibling. So the config says "new" and the build links "legacy".
 # The linker map is the authority here; sdkconfig is not.
 #
-# Two consequences. Leaving esp_driver_i2c off this list means a later
-# #include "driver/i2c_master.h" fails to compile rather than failing to boot,
-# which is the difference between a build error and an afternoon. And moving to
-# IDF 5.4 or above flips the camera to the new driver, at which point anything
-# added here on the legacy API has to move with it or the board stops booting.
+# The umbrella `driver` component publicly requires esp_driver_i2c in IDF 5.3,
+# so leaving esp_driver_i2c off this list does not make its headers unreachable
+# from main. The application component deliberately avoids `driver`, the build
+# daemon refuses the new-driver API in app sources, and the final ELF is checked
+# for i2c_acquire_bus_handle. The linker check is the authority. Moving to IDF
+# 5.4 or above flips the camera to the new driver, at which point the legacy
+# watcher in hw_camera.c has to move with it.

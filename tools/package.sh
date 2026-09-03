@@ -4,8 +4,8 @@
 # -----------------------------------------------------------------------------
 #     tools/package.sh
 #
-# Copies the images out of the build volume into firmware/dist/ and writes the
-# manifest.json the flasher reads. Run after tools/build.sh.
+# Copies the images out of the build volume into transient firmware/dist/.
+# buildd archives a candidate by id; baseline.py publishes the recovery image.
 #
 # The build tree is a Docker volume rather than a directory, deliberately — see
 # build.sh — so the copy has to happen inside a container that can see both it
@@ -38,5 +38,5 @@ Serve the repository root and the flasher will find it:
     python3 -m http.server 8000
 
     frontend  http://localhost:8000/frontend/
-    manifest  http://localhost:8000/firmware/dist/manifest.json
+    transient package  http://localhost:8000/firmware/dist/manifest.json
 EOF

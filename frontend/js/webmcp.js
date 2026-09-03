@@ -9,16 +9,17 @@
 
    Nothing here decides anything. A tool reads the model or asks the board for
    something and reports what came back. Which configuration to try next is
-   the agent's problem, exactly as it is the local search's problem when
-   nobody is calling.
+   the agent's problem. The page records the measurements and keeps the human
+   gate around the write; it does not pretend to synthesize a build locally.
 
    ----------------------------------------------------------------------------
    THREE RULES
 
-   Write tools exist only while a board is linked. They are registered when
-   the link comes up and unregistered when it goes, so an agent cannot be
-   offered set_camera_config for a board that is not there. Read tools are
-   always registered; reading nothing is a valid answer.
+   Tools that touch the board exist only while it is linked. They are
+   registered when the link comes up and unregistered when it goes, so an
+   agent cannot be offered set_camera_config for a board that is not there.
+   Read tools and tools that touch only the page or loopback builder are always
+   registered; reading nothing and compiling before a board arrives are valid.
 
    Every result says where it came from. `source` is sim or usb and `link` is
    the state of the cable, on every reply, because the amber-versus-cyan
@@ -26,7 +27,7 @@
    of simulated telemetry is not a measurement, and the reply says so.
 
    Approve and Hold are never tools. flash_image and provision_wifi ask
-   through the same gate the build loop uses, and wait for a person. An agent
+   through the page's single gate and wait for a person. An agent
    that could approve its own gate has no gate.
 
    ----------------------------------------------------------------------------
@@ -40,7 +41,7 @@
 
 import {
   state, subscribe, waitForState,
-  applyPeripherals, applyWorkOrder, upsertAttempt, pushLimit, applyAgent, applyGate,
+  applyPeripherals, applyFirmware, applyWorkOrder, upsertAttempt, pushLimit, applyAgent, applyGate,
 } from './state.js';
 import { LADDER, fbBytes, label } from './builder/plan.js';
 import { requestGate } from './builder/gate.js';
@@ -79,8 +80,13 @@ export function summarize(buffer, { windowMs = 10000, now = Date.now() } = {}) {
   const gaps = rows.filter(s => s.gap).length;
   const samples = rows.filter(s => !s.gap);
 
+  const names = new Set(FIELDS);
+  for (const sample of samples) {
+    for (const key of Object.keys(sample)) if (key.startsWith('app.')) names.add(key);
+  }
+
   const fields = {};
-  for (const f of FIELDS) {
+  for (const f of names) {
     const pts = samples.map(s => [s.t, s[f]]).filter(([, v]) => Number.isFinite(v));
     if (!pts.length) { fields[f] = null; continue; }
 
@@ -121,32 +127,37 @@ function runningSize() {
 }
 
 /* ------------------------------------------------------------------------ */
-/* effectors, shared with the build loop                                     */
+/* board effectors                                                           */
 /* ------------------------------------------------------------------------ */
 
 /**
  * Apply a camera configuration and wait for the board to confirm it.
  *
- * Built here rather than in main.js so the build loop and the tools use one
- * implementation, and so a test can hand it the simulated board's send. The
+ * Built here rather than in main.js so every tool uses one implementation and
+ * a test can hand it the simulated board's send. The
  * confirmation is what the board reported back, read out of the peripherals
  * slice — not the request echoed — so a config the board refused, or never
  * received, cannot come back looking applied.
  */
 export function configEffector(send) {
   return async function setConfig({ size, quality }, { signal, timeoutMs = 4000 } = {}) {
-    const sent = await send({ t: 'cfg', size, quality });
+    const wantsQuality = Number.isFinite(Number(quality));
+    const request = { t: 'cfg', size, ...(wantsQuality ? { quality: Number(quality) } : {}) };
+    const sent = await send(request);
     if (!sent) return { applied: false, error: 'the link would not accept the write' };
 
     const before = state.peripherals.cfgError;
     const ok = await waitForState(
-      s => (s.peripherals.config?.size === size && s.peripherals.config?.quality === quality)
+      s => (s.peripherals.config?.size === size
+            && (!wantsQuality || s.peripherals.config?.quality === Number(quality)))
         || (s.peripherals.cfgError && s.peripherals.cfgError !== before),
       { timeoutMs, signal },
     ).catch(err => { if (err?.name === 'AbortError') throw err; return false; });
 
     const c = state.peripherals.config;
-    if (c?.size === size && c?.quality === quality) return { applied: true, size, quality };
+    if (c?.size === size && (!wantsQuality || c?.quality === Number(quality))) {
+      return { applied: true, size: c.size, quality: c.quality };
+    }
     return {
       applied: false, size, quality,
       error: state.peripherals.cfgError || (ok ? 'the board answered something else' : `no acknowledgement within ${timeoutMs} ms`),
@@ -165,7 +176,22 @@ function envelope(fx, result) {
   return { ...result, source: fx.source?.() ?? state.ui.source ?? null, link: state.device.link };
 }
 
-const notLinked = () => ({ ok: false, error: 'no board is linked' });
+/** Where bring-up stands, or null when the page has no session to ask. */
+function guide(fx) {
+  try { return fx.bringUp?.() ?? null; } catch { return null; }
+}
+
+/**
+ * A refusal that says what to do about it.
+ *
+ * "No board is linked" is the whole truth and no help: the thing that links a
+ * board is a person choosing a port, and a caller that cannot see the page
+ * has no way to know that. The guide's next step rides along.
+ */
+function notLinked(fx) {
+  const g = guide(fx);
+  return { ok: false, error: 'no board is linked', phase: g?.phase ?? null, next: g?.next ?? null };
+}
 
 function abortError() {
   const e = new Error('aborted');
@@ -190,8 +216,7 @@ function nextAttemptNumber() {
  * A work order to record under, opening one if there is none.
  *
  * An agent that starts experimenting without submitting a goal still leaves a
- * history, and it lands in the same list the local loop writes to — one log,
- * whoever is driving. The banner says who.
+ * history, and it lands in the same list the human sees.
  */
 function ensureWorkOrder() {
   const wo = state.workOrder;
@@ -204,8 +229,8 @@ function ensureWorkOrder() {
     createdAt: wo?.createdAt || Date.now(),
     by: 'agent',
     rehearsal: 'An agent in the browser is driving this board through WebMCP tools. '
-             + 'Measurements come from the board; nothing is compiled or flashed unless '
-             + 'a gate is approved.',
+             + 'Measurements come from the board; compiling changes only local files, and '
+             + 'nothing is flashed unless a gate is approved.',
   });
   return state.workOrder;
 }
@@ -220,7 +245,9 @@ function readTools(fx) {
         + 'MAC, firmware version and slot, link state, which source is driving the page '
         + '(sim or usb), what is attached (camera state and sensor, I2C addresses), whether '
         + 'the board supports runtime camera configuration (cfg), and the frame-size ladder '
-        + 'with the PSRAM each size costs. Call this first; every other tool assumes it.',
+        + 'with the PSRAM each size costs. Call this first; every other tool assumes it. '
+        + 'While link is not "linked", bringUp says which step the page is waiting on and what '
+        + 'a person must do; get_bring_up has the whole flow.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
       execute: async () => {
@@ -231,19 +258,145 @@ function readTools(fx) {
           ok: true,
           device: {
             id: d.id, board: d.board, mcu: d.mcu, mac: d.mac, ip: d.ip, ssid: d.ssid,
+            harness: { ...d.firmware },
             firmware: { ...d.firmware },
+            app: d.app, appState: d.appState, appLoops: d.appLoops,
+            activeBuild: state.firmware.find(row =>
+              String(row.sha || '').toLowerCase() === String(d.firmware.sha || '').toLowerCase())?.buildId || null,
+            bootId: d.bootId, reset: d.reset, reboots: d.reboots,
+            ota: d.ota ?? null, aborted: d.aborted ?? null,
           },
           reporting: !!state.telemetry.latest,
           peripherals: {
             known: p.known, camera: p.camera, i2c: p.i2c, streaming: p.streaming,
             cfgSupported: !!p.cfg, config: p.config,
+            running: p.config
+              ? { ...p.config, from: 'caps' }
+              : runningSize() ? { ...runningSize(), quality: state.frame.jpegQuality || null, from: 'frame' } : null,
           },
           limits: { ...lim },
+          /* Only while there is something to do about it. A linked board has
+             no bring-up left to describe. */
+          bringUp: linked() ? null : orient(guide(fx)),
           ladder: LADDER.map(s => ({
             name: s.name, w: s.w, h: s.h, framebufferBytes: fbBytes(s, 2),
           })),
         };
       },
+    },
+
+    {
+      name: 'get_bring_up',
+      title: 'Where bring-up stands, and what only a person can do',
+      description:
+        'The flow this page runs before a board is linked, as data: the six rungs and their '
+        + 'state, the decision the page is waiting on, the buttons that answer it with what each '
+        + 'does and whether it needs a person, the current fault as observed/causes/next, and how '
+        + 'to get a simulated board with no hardware. Call this when get_board reports link '
+        + '"offline" or a tool answers "no board is linked". Only a person can choose a serial '
+        + 'port; the other buttons write nothing.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      execute: async () => {
+        const g = guide(fx);
+        return g ? { ok: true, ...g } : { ok: false, error: 'this page has no bring-up session' };
+      },
+    },
+
+    {
+      name: 'get_app_source',
+      title: 'Application API and the sources running now',
+      description:
+        'Read the application API header, mutable draft, and immutable minimal baseline from the local '
+        + 'build daemon. Program only against `api`; `files` is the whole replaceable app that '
+        + 'will be used as the next draft, while `baseline` is the recovery starting point. The fixed harness is not editable. Also reports whether the daemon is '
+        + 'reachable or busy.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      execute: async () => {
+        if (!fx.build) return { ok: false, error: 'no build client is configured' };
+        const [health, app, builds] = await Promise.all([fx.build.health(), fx.build.app(), fx.build.list()]);
+        if (!health.ok || !app.ok) {
+          return {
+            ok: false,
+            error: `no build daemon at ${fx.build.base}`,
+            daemon: { reachable: false, busy: false },
+          };
+        }
+        const runningSha = String(state.device.firmware.sha || '').toLowerCase();
+        const activeBuild = builds.ok && Array.isArray(builds.builds)
+          ? builds.builds.find(record => String(record.image?.elf_sha8 || '').toLowerCase() === runningSha)
+          : null;
+        const active = activeBuild ? await fx.build.source(activeBuild.id) : null;
+        return {
+          ok: true,
+          api: app.api,
+          files: app.files,
+          baseline: app.baseline,
+          active: active?.ok ? { buildId: activeBuild.id, files: active.files } : null,
+          ladder: LADDER.map(({ name, w, h }) => ({ name, w, h })),
+          daemon: { reachable: true, busy: !!health.busy },
+        };
+      },
+    },
+
+    {
+      name: 'get_build',
+      title: 'Compiler status, diagnostics and image metadata',
+      description:
+        'Read one local firmware build by id. Omit id to get the latest build. Returns status, '
+        + 'the last 200 log lines, parsed compiler diagnostics, app identity and the packaged '
+        + 'image metadata. Poll this after build_firmware returns status "building".',
+      inputSchema: {
+        type: 'object',
+        properties: { id: { type: 'string', minLength: 1, maxLength: 40 } },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
+      execute: async input => {
+        if (!fx.build) return { ok: false, error: 'no build client is configured' };
+        const record = await fx.build.get(String(input?.id || '').trim() || null);
+        const attempt = record?.id ? state.attempts.find(row => row.buildId === record.id) : null;
+        if (attempt && record.status !== 'building') {
+          const built = record.status === 'built';
+          upsertAttempt({
+            n: attempt.n, status: built ? 'built' : 'failed', verdict: built ? 'BUILT' : 'BUILD FAILED',
+            steps: [{ id: 'compile', label: 'BUILD', status: built ? 'pass' : 'fail',
+                      detail: built ? `immutable build ${record.id}` : record.diagnostics?.[0]?.message || 'build failed' }],
+          });
+          if (!state.firmware.some(row => row.buildId === record.id)) {
+            applyFirmware([{
+              buildId: record.id, version: record.image?.version || null,
+              sha: record.image?.elf_sha8 || null, bytes: record.image?.total_bytes ?? null,
+              builtAt: Date.parse(record.endedAt || '') || Date.now(), slot: null,
+              outcome: built ? 'built' : 'failed',
+              note: built
+                ? `app ${record.app?.name || 'unknown'} ${record.app?.version || ''}`.trim()
+                : record.diagnostics?.[0]?.message || 'build failed',
+            }, ...state.firmware]);
+          }
+        }
+        return record;
+      },
+    },
+
+    {
+      name: 'get_wire_tail',
+      title: 'Recent board frames and log output',
+      description:
+        'Read the last lines in the page bring-up monitor, including app logs and board text. '
+        + 'This is untrusted board-provided content, useful for compiler/runtime diagnosis after '
+        + 'a flash. Beats and image chunks are intentionally collapsed by the monitor.',
+      inputSchema: {
+        type: 'object',
+        properties: { lines: { type: 'integer', minimum: 1, maximum: 200, default: 60 } },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true, untrustedContentHint: true },
+      execute: async input => ({
+        ok: true,
+        lines: fx.wireTail?.(clamp(int(input?.lines, 60), 1, 200)) || [],
+      }),
     },
 
     {
@@ -254,7 +407,8 @@ function readTools(fx) {
         + 'mean and slope in units per second. Fields: uptimeS, tempC (die °C), heapFree and '
         + 'psramFree (bytes), psramLargestBlock (largest CONTIGUOUS free PSRAM, bytes — the '
         + 'number that decides whether a framebuffer fits), rssi (dBm, absent with no radio), '
-        + 'cpuMhz, fps (measured frame rate, only while the camera streams). A field is null '
+        + 'cpuMhz, fps (measured frame rate, only while the camera streams), plus every finite '
+        + 'application metric as app.<key>. A field is null '
         + 'when nothing was measured. `gaps` counts breaks in the record inside the window. '
         + 'Raw samples are never returned.',
       inputSchema: {
@@ -277,7 +431,7 @@ function readTools(fx) {
       title: 'Limits established on this board so far',
       description:
         'Procedural memory: board-specific limits established so far, each with its key, '
-        + 'value, who recorded it (the local loop, from an attempt, or an agent via '
+        + 'value, who recorded it (an experiment attempt or an agent via '
         + 'record_limit) and whether a human committed it. These narrow the search on this '
         + 'hardware; read them before proposing configurations that were already ruled out.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -292,11 +446,12 @@ function readTools(fx) {
         'Capture one frame from the camera. The frame is decoded and shown in the camera '
         + 'panel for the human; this returns its dimensions, JPEG quality, byte count and '
         + 'sequence number, not the pixels. Turns the camera on if it is off and back off '
-        + 'afterwards. Fails if no board is linked or it has no camera.',
+        + 'afterwards. Fails if no board is linked or it has no camera.'
+        + ' Until a board is linked it fails with "no board is linked" and says what a person must press.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
       execute: async (_input, { signal } = {}) => {
-        if (!linked()) return notLinked();
+        if (!linked()) return notLinked(fx);
         if (state.peripherals.camera?.state !== 'ok') {
           return { ok: false, error: `no camera on this board (${state.peripherals.camera?.state || 'unknown'})` };
         }
@@ -319,12 +474,11 @@ function readTools(fx) {
 
     {
       name: 'get_images',
-      title: 'Firmware images published and written',
+      title: 'Factory baseline and immutable candidate images',
       description:
-        'Firmware images this page can write to the board: what the server has published '
-        + '(version, project, ELF hash, parts with offsets and sizes) and what has already been '
-        + 'recorded as built or applied in this session. Writing one requires flash_image and '
-        + 'a human approval.',
+        'Read the known-safe factory baseline and the immutable candidates built in this session. '
+        + 'Candidates are selected by buildId and written only to inactive OTA slots. Writing any '
+        + 'image requires a human approval.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
       execute: async () => {
@@ -340,9 +494,9 @@ function readTools(fx) {
           error = err.message;
         }
         return {
-          ok: !error, error, published,
+          ok: !error, error, baseline: published,
           history: state.firmware.map(f => ({
-            version: f.version, sha: f.sha, bytes: f.bytes, slot: f.slot,
+            buildId: f.buildId || null, version: f.version, sha: f.sha, bytes: f.bytes, slot: f.slot,
             outcome: f.outcome, note: f.note,
           })),
         };
@@ -377,6 +531,144 @@ function readTools(fx) {
   ];
 }
 
+/** Tools that mutate only the local page or loopback build daemon. */
+function pageTools(fx) {
+  return [
+    {
+      name: 'build_firmware',
+      title: 'Compile a whole application beside the fixed harness',
+      description:
+        'Replace the complete application source set and compile it with the fixed harness on '
+        + 'the local build daemon. Read get_app_source first and program only against its API. '
+        + 'The daemon returns compiler diagnostics; fix them and build again. This does not touch '
+        + 'the board. The default wait is 20 seconds; if status is "building", keep the id and '
+        + 'poll get_build. Flash only with flash_image, which asks a human first.',
+      inputSchema: {
+        type: 'object', required: ['files'],
+        properties: {
+          files: {
+            type: 'object',
+            description: 'The whole app: file name to C/header source. Must include app.c. Multiple C files are supported; the daemon generates the component manifest.',
+            additionalProperties: { type: 'string' },
+          },
+          note: { type: 'string', maxLength: 1000 },
+          waitMs: { type: 'integer', minimum: 1000, maximum: 120000, default: 20000 },
+        },
+        additionalProperties: false,
+      },
+      execute: async (input, { signal } = {}) => {
+        if (!fx.build) return { ok: false, error: 'no build client is configured' };
+        const health = await fx.build.health();
+        if (!health.ok) return { ok: false, error: `no build daemon at ${fx.build.base}` };
+
+        const files = input?.files;
+        const note = String(input?.note || '').trim();
+        const started = await fx.build.start(files, note);
+        if (!started.ok) return started;
+
+        ensureWorkOrder();
+        const attempt = nextAttemptNumber();
+        upsertAttempt({
+          n: attempt, by: 'agent', buildId: started.id, status: 'running',
+          startedAt: Date.now(), firmware: null,
+          steps: [{ id: 'compile', label: 'BUILD', status: 'running', detail: `build ${started.id}` }],
+          reasoning: { change: note || 'Compiled a new application candidate.' },
+        });
+
+        const waitMs = clamp(int(input?.waitMs, 20000), 1000, 120000);
+        const record = await fx.build.waitFor(started.id, { untilMs: waitMs, signal });
+        if (!record.ok) {
+          upsertAttempt({ n: attempt, status: 'failed', verdict: 'BUILD FAILED',
+            steps: [{ id: 'compile', label: 'BUILD', status: 'fail', detail: record.error || 'build unavailable' }] });
+          return { ...record, id: record.id || started.id, attempt };
+        }
+        if (record.status === 'building') {
+          upsertAttempt({ n: attempt, steps: [{ id: 'compile', label: 'BUILD', status: 'running', detail: `build ${started.id} continues` }] });
+          return { ok: true, status: 'building', id: started.id, attempt };
+        }
+
+        const firstDiagnostic = record.diagnostics?.[0];
+        const identity = record.app || {};
+        const outcome = record.status === 'built' ? 'built' : 'failed';
+        const rowNote = outcome === 'built'
+          ? [`app ${identity.name || 'unknown'} ${identity.version || ''}`.trim(), note].filter(Boolean).join(' · ')
+          : firstDiagnostic?.message || 'the build failed; read get_build for its log';
+        applyFirmware([{
+          version: record.image?.version || null,
+          sha: record.image?.elf_sha8 || null,
+          bytes: record.image?.total_bytes ?? null,
+          builtAt: Date.parse(record.endedAt || '') || Date.now(),
+          slot: null,
+          outcome,
+          note: rowNote,
+          buildId: record.id,
+        }, ...state.firmware]);
+        upsertAttempt({
+          n: attempt,
+          status: outcome === 'built' ? 'built' : 'failed',
+          verdict: outcome === 'built' ? 'BUILT' : 'BUILD FAILED',
+          firmware: outcome === 'built'
+            ? `${record.image?.version || 'firmware'} / ${identity.name || 'app'} ${identity.version || ''}`.trim()
+            : null,
+          durationMs: Date.now() - state.attempts.find(row => row.n === attempt)?.startedAt,
+          steps: [{ id: 'compile', label: 'BUILD', status: outcome === 'built' ? 'pass' : 'fail',
+                    detail: outcome === 'built' ? `immutable build ${record.id}` : rowNote }],
+        });
+        return { ...record, ok: outcome === 'built', attempt };
+      },
+    },
+
+    {
+      name: 'record_attempt',
+      title: 'Record the agent’s reasoning and observed result',
+      description:
+        'Append one experiment record to the build log the human sees. Supply observations, '
+        + 'the hypothesis being tested, the concrete change and the result. verdict may be '
+        + 'passed, failed or recorded. Pass the buildId returned by build_firmware to complete '
+        + 'that build\'s existing live record instead of opening another attempt. This records '
+        + 'evidence; it does not build or touch a board.',
+      inputSchema: {
+        type: 'object', required: ['observed', 'hypothesis', 'change', 'result'],
+        properties: {
+          observed: { type: 'string', maxLength: 2000 },
+          hypothesis: { type: 'string', maxLength: 2000 },
+          change: { type: 'string', maxLength: 2000 },
+          result: { type: 'string', maxLength: 2000 },
+          verdict: { type: 'string', enum: ['passed', 'failed', 'recorded'], default: 'recorded' },
+          firmware: { type: 'string', maxLength: 80 },
+          buildId: { type: 'string', maxLength: 40, description: 'Build to update instead of opening a separate attempt.' },
+        },
+        additionalProperties: false,
+      },
+      execute: async input => {
+        ensureWorkOrder();
+        const verdict = ['passed', 'failed'].includes(input?.verdict) ? input.verdict : 'recorded';
+        const buildId = String(input?.buildId || '').trim();
+        const existing = buildId ? state.attempts.find(row => row.buildId === buildId) : null;
+        const n = existing?.n || nextAttemptNumber();
+        upsertAttempt({
+          n,
+          buildId: buildId || existing?.buildId || null,
+          by: 'agent',
+          status: verdict,
+          verdict: verdict.toUpperCase(),
+          firmware: String(input?.firmware || '').trim() || null,
+          startedAt: Date.now(),
+          durationMs: 0,
+          steps: [{ id: 'record', label: 'VERIFY', status: verdict === 'failed' ? 'fail' : 'pass' }],
+          reasoning: {
+            observed: String(input?.observed || '').trim(),
+            hypothesis: String(input?.hypothesis || '').trim(),
+            change: String(input?.change || '').trim(),
+            result: String(input?.result || '').trim(),
+          },
+        });
+        return { ok: true, attempt: n, status: verdict };
+      },
+    },
+  ];
+}
+
 function writeTools(fx) {
   return [
     {
@@ -385,14 +677,15 @@ function writeTools(fx) {
       description:
         'Start or stop the camera streaming frames over the cable. Frames cost bandwidth on a '
         + 'link shared with telemetry, so leave it off when not measuring. fps in telemetry is '
-        + 'only measured while streaming.',
+        + 'only measured while streaming.'
+        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
         type: 'object', required: ['on'],
         properties: { on: { type: 'boolean' } },
         additionalProperties: false,
       },
       execute: async input => {
-        if (!linked()) return notLinked();
+        if (!linked()) return notLinked(fx);
         const on = !!input?.on;
         const seq0 = state.peripherals.streaming;
         await fx.setCamera(on);
@@ -410,7 +703,8 @@ function writeTools(fx) {
         + 'reflash. Only works on a board whose get_board reports cfgSupported; otherwise it '
         + 'fails and the board keeps running what it has. `size` is a ladder name (QQVGA, '
         + 'QVGA, CIF, HVGA, VGA, SVGA, XGA, HD, SXGA, UXGA). quality is 10–63, lower is '
-        + 'better. The reply is what the board confirmed, not what was asked.',
+        + 'better. The reply is what the board confirmed, not what was asked.'
+        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
         type: 'object', required: ['size'],
         properties: {
@@ -420,7 +714,7 @@ function writeTools(fx) {
         additionalProperties: false,
       },
       execute: async (input, { signal } = {}) => {
-        if (!linked()) return notLinked();
+        if (!linked()) return notLinked(fx);
         const size = sizeNamed(input?.size);
         if (!size) return { ok: false, error: `unknown frame size; the ladder is ${LADDER.map(s => s.name).join(', ')}` };
         if (!state.peripherals.cfg) {
@@ -443,7 +737,8 @@ function writeTools(fx) {
         + 'contiguous PSRAM block and heap, each with count/min/max/mean/slope, plus '
         + '`applied` — whether the board actually ran the requested config. On a board without '
         + 'cfg support the config is NOT applied and the numbers describe whatever it was '
-        + 'already running; `measuredSize` says which. Honors cancellation.',
+        + 'already running; `measuredSize` says which. Honors cancellation.'
+        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
         type: 'object', required: ['size'],
         properties: {
@@ -463,13 +758,14 @@ function writeTools(fx) {
       description:
         'Block until a condition on live telemetry or the link becomes true, or timeoutMs '
         + 'expires. Either `field`/`op`/`value` (field is a telemetry field name, op is one of '
-        + '>, >=, <, <=, ==) or `link` (linked, lost, rebooting, offline). Returns whether it '
+        + '>, >=, <, <=, ==; application metrics are app.<key>) or `link` (linked, lost, '
+        + 'rebooting, offline). Returns whether it '
         + 'matched, why it stopped, how long it waited and the value seen. Use it instead of '
         + 'polling get_telemetry_summary. Honors cancellation.',
       inputSchema: {
         type: 'object',
         properties: {
-          field: { type: 'string', enum: FIELDS },
+          field: { type: 'string', minLength: 1, maxLength: 40 },
           op: { type: 'string', enum: ['>', '>=', '<', '<=', '=='] },
           value: { type: 'number' },
           link: { type: 'string', enum: ['linked', 'lost', 'rebooting', 'offline'] },
@@ -499,7 +795,7 @@ function writeTools(fx) {
       title: 'Write a learned limit into procedural memory',
       description:
         'Write a learned limit into the board\'s procedural memory, where the human reads it '
-        + 'alongside what the local loop learned. Use a stable dotted key such as '
+        + 'alongside what experiment attempts learned. Use a stable dotted key such as '
         + '"camera.max_size_at_10fps" and a value a person can act on, and say in `note` which '
         + 'measurement established it. Recorded limits are marked as recorded by an agent and '
         + 'as session-only until a human commits them.',
@@ -523,28 +819,86 @@ function writeTools(fx) {
 
     {
       name: 'flash_image',
-      title: 'Write the published image; asks a human first',
+      title: 'Write one immutable candidate build; asks a human first',
       description:
-        'Write the published firmware image to the board. This ASKS A HUMAN FIRST: the call '
+        'Write a specific successful build to the board\'s inactive OTA slot. This ASKS A HUMAN FIRST: the call '
         + 'blocks until the operator presses Approve on the page, and returns refused if they '
         + 'press Hold or do not answer before you cancel. Nothing touches the board until '
-        + 'approval. The board resets afterwards and the link is re-established by the page. '
-        + 'eraseAll wipes stored credentials and counters too.',
+        + 'approval. The immutable buildId prevents a newer build from replacing the approved image. '
+        + 'The factory baseline is not overwritten.'
+        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
-        type: 'object',
-        properties: { eraseAll: { type: 'boolean', default: false } },
+        type: 'object', required: ['buildId'],
+        properties: { buildId: { type: 'string', minLength: 1, maxLength: 40 } },
         additionalProperties: false,
       },
       execute: async (input, { signal } = {}) => {
-        if (!linked()) return notLinked();
-        return gated(fx, {
-          action: `Write the published firmware image to the board${input?.eraseAll ? ', erasing it first' : ''}`,
-          rationale: 'An agent asked to reflash the board. Writing replaces what is running and, '
-                   + 'with erase, everything the board has stored. It does not happen without you.',
+        if (!linked()) return notLinked(fx);
+        const buildId = String(input?.buildId || '').trim();
+        const build = await fx.build?.get(buildId);
+        if (!build?.ok || build.status !== 'built' || !build.image?.artifact) {
+          return { ok: false, error: `build ${buildId || '(missing)'} is not a flashable successful build` };
+        }
+        if (build.image.activation_protocol !== 2) {
+          return { ok: false, error: `build ${buildId} predates the self-confirming harness (protocol 2); rebuild its source against the current harness` };
+        }
+        const app = build.app || {};
+        const attempt = state.attempts.find(row => row.buildId === buildId);
+        if (attempt) upsertAttempt({ n: attempt.n, status: 'gated',
+          steps: [{ id: 'flash', label: 'FLASH', status: 'running', detail: 'waiting for operator approval' }] });
+        const outcome = await gated(fx, {
+          action: `Write build ${buildId} · ${app.name || 'app'} ${app.version || ''} to the inactive OTA slot`,
+          rationale: 'An agent asked to activate one immutable candidate. The factory baseline and stored data remain untouched.',
           signal,
         }, async () => {
-          await fx.flash({ eraseAll: !!input?.eraseAll });
-          return { ok: true, written: true, note: 'the board is resetting; the link will return on its own' };
+          if (attempt) upsertAttempt({ n: attempt.n, status: 'running',
+            steps: [{ id: 'flash', label: 'FLASH', status: 'running', detail: 'writing inactive OTA slot' }] });
+          const result = await fx.flash({ buildId, imageBase: fx.build.artifactBase(buildId) });
+          const fault = result?.fault || null;
+          const reply = {
+            ok: !!result?.flashDone && !fault,
+            written: !!result?.flashDone,
+            buildId,
+            phase: result?.phase || null,
+            fault,
+          };
+          if (attempt) upsertAttempt({
+            n: attempt.n, status: reply.ok ? 'passed' : 'failed',
+            verdict: reply.ok ? 'FLASHED' : 'FLASH FAILED',
+            durationMs: Date.now() - attempt.startedAt,
+            steps: [{ id: 'flash', label: 'FLASH', status: reply.ok ? 'pass' : 'fail',
+                      detail: reply.ok ? 'candidate booted and reported' : fault?.detail || 'flash did not complete' }],
+          });
+          return reply;
+        });
+        if (attempt && outcome?.refused) upsertAttempt({ n: attempt.n, status: 'built', verdict: 'BUILT',
+          steps: [{ id: 'flash', label: 'FLASH', status: 'skipped', detail: `operator ${outcome.refused}` }] });
+        else if (attempt && !outcome?.ok) upsertAttempt({ n: attempt.n, status: 'failed', verdict: 'FLASH FAILED',
+          steps: [{ id: 'flash', label: 'FLASH', status: 'fail', detail: outcome?.error || 'flash did not complete' }] });
+        return outcome;
+      },
+    },
+
+    {
+      name: 'restore_baseline',
+      title: 'Restore the known-safe factory baseline; asks a human first',
+      description:
+        'Write the explicit minimal baseline image to factory and reboot into it. This is a recovery operation and ASKS A HUMAN FIRST. '
+        + 'It does not promote a candidate or change baseline source. Stored data is retained.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async (_input, { signal } = {}) => {
+        if (!linked()) return notLinked(fx);
+        const baseline = await fx.build?.baseline();
+        if (!baseline?.ok) return { ok: false, error: baseline?.error || 'the baseline image has not been built yet' };
+        return gated(fx, {
+          action: `Restore factory baseline ${baseline.version || ''} · ${baseline.app?.name || 'default'} ${baseline.app?.version || ''}`,
+          rationale: 'This replaces the factory image with the committed minimal baseline and reboots the board. It does not erase stored data.',
+          signal,
+        }, async () => {
+          const result = await fx.flash({ baseline: true, imageBase: fx.build.baselineBase });
+          const fault = result?.fault || null;
+          return { ok: !!result?.flashDone && !fault, written: !!result?.flashDone, baseline: true,
+                   phase: result?.phase || null, fault };
         });
       },
     },
@@ -556,7 +910,8 @@ function writeTools(fx) {
         'Store Wi-Fi credentials on the board and have it join. ASKS A HUMAN FIRST — blocks '
         + 'until Approve, refused on Hold. The radio is 2.4 GHz only. The reply is what the '
         + 'board read back from its own storage, never the passphrase. Telemetry over the cable '
-        + 'is unaffected either way.',
+        + 'is unaffected either way.'
+        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
         type: 'object', required: ['ssid'],
         properties: {
@@ -566,7 +921,7 @@ function writeTools(fx) {
         additionalProperties: false,
       },
       execute: async (input, { signal } = {}) => {
-        if (!linked()) return notLinked();
+        if (!linked()) return notLinked(fx);
         const ssid = String(input?.ssid || '').trim();
         if (!ssid) return { ok: false, error: 'ssid is required' };
         return gated(fx, {
@@ -581,39 +936,13 @@ function writeTools(fx) {
         });
       },
     },
-
-    {
-      name: 'submit_work_order',
-      title: "Hand a goal to the page's own build loop",
-      description:
-        'Hand a goal in plain language to the page\'s own build loop and let it run. The loop '
-        + 'searches configurations against the board and records attempts in the same log as '
-        + 'run_experiment; watch it with get_work_order. The goal must contain something '
-        + 'checkable — a frame-rate floor, a temperature ceiling, a memory reserve, or '
-        + 'something to maximise — or it is refused. Refused if a run is already in progress.',
-      inputSchema: {
-        type: 'object', required: ['goal'],
-        properties: { goal: { type: 'string', minLength: 4, maxLength: 400 } },
-        additionalProperties: false,
-      },
-      execute: async input => {
-        if (!linked()) return notLinked();
-        if (state.workOrder?.status === 'running') {
-          return { ok: false, error: 'a work order is already running; abandon it on the page first' };
-        }
-        const goal = String(input?.goal || '').trim();
-        const r = fx.submitWorkOrder(goal);
-        if (r && r.ok === false) return r;
-        return { ok: true, workOrder: state.workOrder };
-      },
-    },
   ];
 }
 
 /* ------------------------------------------------------------------------ */
 
 async function runExperiment(fx, input, { signal } = {}) {
-  if (!linked()) return notLinked();
+  if (!linked()) return notLinked(fx);
   const size = sizeNamed(input?.size);
   if (!size) return { ok: false, error: `unknown frame size; the ladder is ${LADDER.map(s => s.name).join(', ')}` };
   if (state.peripherals.camera?.state !== 'ok') {
@@ -774,6 +1103,12 @@ function learnedLimits() {
 
 /* ---- small helpers ----------------------------------------------------- */
 
+/** The guide, cut to what get_board needs: the phase, the wait, the next step. */
+function orient(g) {
+  if (!g) return null;
+  return { phase: g.phase, waitingOn: g.waitingOn, next: g.next };
+}
+
 const sizeNamed = name => LADDER.find(s => s.name === String(name || '').toUpperCase()) || null;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const int = (v, d) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : d);
@@ -788,11 +1123,17 @@ function predicate(input) {
   const f = input?.field;
   const op = OPS[input?.op];
   const v = Number(input?.value);
-  if (!FIELDS.includes(f) || !op || !Number.isFinite(v)) return null;
+  if (!validTelemetryField(f) || !op || !Number.isFinite(v)) return null;
   return s => {
     const x = s.telemetry.latest?.[f];
     return Number.isFinite(x) && op(x, v);
   };
+}
+
+function validTelemetryField(field) {
+  if (FIELDS.includes(field)) return true;
+  if (!/^app\.[a-z0-9_]{1,16}$/.test(field || '')) return false;
+  return state.telemetry.buffer.some(sample => Number.isFinite(sample?.[field]));
 }
 
 function seen(input) {
@@ -810,7 +1151,7 @@ function seen(input) {
  *
  * @param {object} opts
  *   fx            effectors: setCamera, setConfig, flash, provision,
- *                 submitWorkOrder, manifest, source
+ *                 manifest, build, wireTail, source
  *   modelContext  the registry; defaults to document.modelContext, then to
  *                 navigator.modelContext
  *   quietMs       how long since the last call counts as gone quiet
@@ -827,6 +1168,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
     ?? null;
 
   const reads = readTools(fx);
+  const pages = pageTools(fx);
   const writes = writeTools(fx);
   const registered = new Set();
 
@@ -835,7 +1177,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
      once even when there is no registry, so a person can see what an agent
      would get before opening the page somewhere one can. */
   const publish = () => applyAgent({
-    tools: [...reads, ...writes].map(t => ({
+    tools: [...reads, ...pages, ...writes].map(t => ({
       name: t.name,
       title: t.title || t.name,
       readOnly: !!t.annotations?.readOnlyHint,
@@ -869,7 +1211,12 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
                    lastAt: Date.now(), quiet: false });
       let result;
       try {
-        result = await tool.execute(input ?? {}, ctx);
+        let args = input ?? {};
+        if (typeof args === 'string') {
+          try { args = JSON.parse(args); }
+          catch { args = {}; }
+        }
+        result = await tool.execute(args, ctx);
       } catch (err) {
         result = { ok: false, error: err?.message || String(err) };
       } finally {
@@ -890,7 +1237,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
   };
 
   const readCtl = new AbortController();
-  register(reads, readCtl.signal);
+  register([...reads, ...pages], readCtl.signal);
 
   /* Write tools follow the link. Registered on linked, withdrawn on anything
      else, so the agent is never offered a lever with nothing on the end. */

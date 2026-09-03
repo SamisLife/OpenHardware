@@ -1,22 +1,17 @@
 /* ============================================================================
    gate.js — the one place a human is asked before something irreversible.
    ----------------------------------------------------------------------------
-   Two things want an approval: the build loop, before it commits a learned
-   limit to procedural memory, and the tools an agent calls, before they write
-   firmware or credentials to the board. They used to be one closure inside the
-   loop. Pulling it out here is what lets a tool and the loop share a single
-   pair of buttons, and it fixes the property that matters: there is exactly
-   one pending gate, and Approve means whatever is pending.
+   Agent tools ask here before they write firmware or credentials to the board.
+   Keeping the decision in one place fixes the property that matters: there is
+   exactly one pending gate, and Approve means whatever is pending.
 
    Approve and Hold are never tools. An agent that could approve its own gate
    has no gate, and the entire reason this exists is that a model does not get
    to decide, on its own, to flash a board or to write something that outlives
    the session.
 
-   `held` is a resolution, not a refusal. The loop treats it as "released" and
-   carries on, because its gate guards a memory write that can be undone. A
-   tool treats it as "no", because its gate guards a write to the board that
-   cannot. The caller decides; this file only reports what the human did.
+   `held` is a resolution and the calling tool treats it as "no". This file
+   only reports what the human did.
    ========================================================================== */
 
 /** The gate currently waiting on a person, or null. */

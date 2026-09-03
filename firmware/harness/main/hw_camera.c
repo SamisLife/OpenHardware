@@ -40,6 +40,7 @@
    ========================================================================== */
 
 #include "hw.h"
+#include "hw_app.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -49,6 +50,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 static const char *TAG = "hw_camera";
 
@@ -126,16 +129,82 @@ static uint32_t s_frames = 0;
 static int64_t  s_window_us = 0;
 static float    s_fps = 0.0f;
 
+typedef struct {
+    framesize_t size;
+    int quality;
+} camera_request_t;
+
+typedef struct {
+    const char *name;
+    framesize_t size;
+} camera_size_t;
+
+static const camera_size_t SIZES[] = {
+    { "QQVGA", FRAMESIZE_QQVGA },
+    { "QVGA",  FRAMESIZE_QVGA  },
+    { "CIF",   FRAMESIZE_CIF   },
+    { "HVGA",  FRAMESIZE_HVGA  },
+    { "VGA",   FRAMESIZE_VGA   },
+    { "SVGA",  FRAMESIZE_SVGA  },
+    { "XGA",   FRAMESIZE_XGA   },
+    { "HD",    FRAMESIZE_HD    },
+    { "SXGA",  FRAMESIZE_SXGA  },
+    { "UXGA",  FRAMESIZE_UXGA  },
+};
+
+static QueueHandle_t s_config_queue;
+static framesize_t s_running_size = FRAMESIZE_SVGA;
+static int s_running_quality = HW_CAM_JPEG_QUALITY;
+
 /* ------------------------------------------------------------------------ */
 /* what it is                                                                */
 /* ------------------------------------------------------------------------ */
 
 hw_cam_state_t hw_camera_state(void)  { return s_cam; }
 const char    *hw_camera_sensor(void) { return s_sensor; }
-int            hw_camera_quality(void) { return HW_CAM_JPEG_QUALITY; }
+int            hw_camera_quality(void) { return s_running_quality; }
 
 void hw_camera_set_streaming(bool on) { s_streaming = on; }
 bool hw_camera_streaming(void)        { return s_streaming; }
+
+static const camera_size_t *size_by_name(const char *name)
+{
+    if (!name) return NULL;
+    for (size_t i = 0; i < sizeof(SIZES) / sizeof(SIZES[0]); i++) {
+        if (strcmp(SIZES[i].name, name) == 0) return &SIZES[i];
+    }
+    return NULL;
+}
+
+static const char *name_by_size(framesize_t size)
+{
+    for (size_t i = 0; i < sizeof(SIZES) / sizeof(SIZES[0]); i++) {
+        if (SIZES[i].size == size) return SIZES[i].name;
+    }
+    return "unknown";
+}
+
+const char *hw_camera_size_name(void)
+{
+    return name_by_size(s_running_size);
+}
+
+void hw_camera_init(void)
+{
+    if (!s_config_queue) s_config_queue = xQueueCreate(1, sizeof(camera_request_t));
+}
+
+bool hw_camera_request_config(const char *size, int quality)
+{
+    const camera_size_t *found = size_by_name(size);
+    if (!found || !s_config_queue) return false;
+
+    camera_request_t request = {
+        .size = found->size,
+        .quality = quality < 10 ? 10 : (quality > 63 ? 63 : quality),
+    };
+    return xQueueOverwrite(s_config_queue, &request) == pdTRUE;
+}
 
 const char *hw_camera_state_str(void)
 {
@@ -221,12 +290,11 @@ static hw_cam_state_t bring_up(void)
         .ledc_channel = LEDC_CHANNEL_0,
 
         .pixel_format = PIXFORMAT_JPEG,
-        /* Conservative on purpose. The harness only has to prove the sensor
-           works. Finding the resolution and quality a given board can actually
-           sustain is the job of whatever runs on top, and is the entire point
-           of the project — so the harness must not quietly pick the answer. */
-        .frame_size = FRAMESIZE_SVGA,
-        .jpeg_quality = HW_CAM_JPEG_QUALITY,
+        /* Buffers are allocated once. Initialising at the largest supported
+           rung makes later set-down and set-up requests safe without tearing
+           down the driver or reallocating memory under a live stream. */
+        .frame_size = FRAMESIZE_UXGA,
+        .jpeg_quality = s_running_quality,
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST,
@@ -253,6 +321,25 @@ static hw_cam_state_t bring_up(void)
                 snprintf(s_sensor, sizeof(s_sensor), "0x%02X", s->id.PID);
                 break;
         }
+        /* UXGA sized the buffers; the configured rung is what actually runs.
+           A hot-plug re-init follows the same path and therefore restores the
+           last accepted request instead of silently returning to defaults. */
+        if (s->set_framesize(s, s_running_size) != 0
+            || s->set_quality(s, s_running_quality) != 0) {
+            s_last_err = ESP_ERR_CAMERA_FAILED_TO_SET_FRAME_SIZE;
+            esp_camera_deinit();
+            strcpy(s_sensor, "none");
+            s_cam = HW_CAM_ABSENT;
+            return s_cam;
+        }
+        s_running_size = s->status.framesize;
+        s_running_quality = s->status.quality;
+    } else {
+        s_last_err = ESP_ERR_INVALID_STATE;
+        esp_camera_deinit();
+        strcpy(s_sensor, "none");
+        s_cam = HW_CAM_ABSENT;
+        return s_cam;
     }
 
     s_cam = HW_CAM_OK;
@@ -260,6 +347,67 @@ static hw_cam_state_t bring_up(void)
     s_fps = 0.0f;
     s_window_us = esp_timer_get_time();
     return s_cam;
+}
+
+/* ------------------------------------------------------------------------ */
+/* runtime configuration                                                     */
+/* ------------------------------------------------------------------------ */
+
+int hw_camera_apply_pending(const char **err)
+{
+    if (err) *err = NULL;
+    if (!s_config_queue) return 0;
+
+    camera_request_t request;
+    if (xQueueReceive(s_config_queue, &request, 0) != pdTRUE) return 0;
+
+    if (s_cam != HW_CAM_OK) {
+        if (err) *err = "no camera";
+        return -1;
+    }
+    if (request.size > FRAMESIZE_UXGA) {
+        if (err) *err = "ESP_ERR_INVALID_SIZE";
+        return -1;
+    }
+
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (!sensor) {
+        if (err) *err = "no camera";
+        return -1;
+    }
+
+    const framesize_t previous_size = s_running_size;
+    const int previous_quality = s_running_quality;
+    if (sensor->set_framesize(sensor, request.size) != 0) {
+        if (err) *err = "ESP_ERR_CAMERA_FAILED_TO_SET_FRAME_SIZE";
+        return -1;
+    }
+    if (sensor->set_quality(sensor, request.quality) != 0) {
+        sensor->set_framesize(sensor, previous_size);
+        sensor->set_quality(sensor, previous_quality);
+        if (err) *err = "ESP_ERR_CAMERA_FAILED_TO_SET_QUALITY";
+        return -1;
+    }
+
+    s_running_size = sensor->status.framesize;
+    s_running_quality = sensor->status.quality;
+    s_frames = 0;
+    s_fps = 0.0f;
+    s_window_us = esp_timer_get_time();
+    hw_proto_reset_image_budget_notice();
+    return 1;
+}
+
+void hw_camera_drain_frames(void)
+{
+    /* Acknowledgement precedes this drain in camera_task. esp_camera_fb_get()
+       may wait several seconds on a stalled sensor, and a successfully applied
+       request must not look unacknowledged while old queued frames are cleared. */
+    for (int i = 0; i < 2; i++) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (!fb) break;
+        esp_camera_fb_return(fb);
+    }
 }
 
 /**
@@ -409,6 +557,7 @@ bool hw_camera_watch(void)
         s_frames = 0;
         s_fps = 0.0f;
         s_capture_failed = false;
+        hw_proto_reset_image_budget_notice();
 
         ESP_LOGW(TAG, "camera stopped answering on SCCB; treating it as removed");
         hw_proto_status("camera_absent", "the sensor stopped answering");
@@ -482,13 +631,15 @@ bool hw_camera_capture_and_send(uint32_t seq)
     }
 
     s_capture_failed = false;
-    s_frames++;
     s_last_capture_us = esp_timer_get_time();
+
+    app_on_frame(fb->buf, fb->len, (int)fb->width, (int)fb->height);
+    const bool sent = hw_proto_send_image(fb->buf, fb->len, seq,
+                                          (int)fb->width, (int)fb->height,
+                                          s_running_quality);
+    if (sent) s_frames++;
     fps_roll();
 
-    hw_proto_send_image(fb->buf, fb->len, seq,
-                        (int)fb->width, (int)fb->height, HW_CAM_JPEG_QUALITY);
-
     esp_camera_fb_return(fb);
-    return true;
+    return sent;
 }

@@ -81,7 +81,7 @@ const BOOT_LOG = [
 
 export class SimBoard {
   /** @param {string} scene one of the scenes named above */
-  constructor(scene = '') {
+  constructor(scene = '', identity = {}) {
     this.scene = String(scene || '').toLowerCase();
     this.handlers = null;
     this.reader = null;
@@ -92,6 +92,9 @@ export class SimBoard {
     this.seq = 0;
     this.streaming = false;
     this.gone = false;
+    this.sha = identity.sha || '5111111111111111';
+    this.bootId = identity.bootId || 'sim00001';
+    this.app = identity.app || { name: 'sim-app', ver: '1.0' };
 
     this.hasCamera = this.scene !== 'nocam';
 
@@ -134,6 +137,9 @@ export class SimBoard {
     this.every(HELLO_MS, () => this.sendHello());
     this.every(BEAT_MS, () => { this.thermalTick(); this.sendBeat(); });
     this.every(FRAME_MS, () => this.sendImage());
+    this.every(4000, () => this.emit({
+      t: 'log', src: 'app', msg: `loop ${Math.floor((Date.now() - this.bootedAt) / 100)}`,
+    }));
 
     /* The camera comes up last, exactly as the bring-up order specifies: it is
        the one step that can take the system down, so it runs once the board is
@@ -175,14 +181,15 @@ export class SimBoard {
     this.emit({
       t: 'hello',
       proto: 1,
-      fw: '0.6.0-sim',
-      sha: '5111111111',
+      fw: '0.14.0-sim',
+      sha: this.sha,
       slot: 'factory',
+      ota: 'factory',
       board: 'sim_board',
       board_name: 'Simulated board',
       chip: 'esp32s3',
       mac: '02:00:00:00:00:01',
-      boot_id: 'sim00001',
+      boot_id: this.bootId,
       reset: 'POWERON',
       psram: 8 * MB,
       heap_total: 327680,
@@ -192,6 +199,7 @@ export class SimBoard {
       provisioned: !!this.ssid,
       ssid: this.ssid,
       net: this.net,
+      app: { ...this.app, state: 'running' },
       ...(this.ip === null ? {} : { ip: this.ip }),
     });
   }
@@ -206,12 +214,17 @@ export class SimBoard {
       psram_free: Math.round(6.1 * MB - fbBytes(this.size, 2) + Math.sin(age / 11) * 0.2 * MB),
       psram_largest: Math.round(largestFor(this.size)),
       cpu_mhz: 240,
-      fps: this.streaming && this.cameraUp
-        ? round(fpsFor(this.size) * (1 + Math.sin(age / 3) * 0.06), 2)
-        : 0,
-      boot_id: 'sim00001',
+      ...(this.streaming && this.cameraUp ? {
+        fps: round(fpsFor(this.size) * (1 + Math.sin(age / 3) * 0.06), 2),
+      } : {}),
+      boot_id: this.bootId,
       cam: this.cameraUp ? 'ok' : this.hasCamera ? 'untried' : 'absent',
       net: this.net,
+      app: {
+        state: 'running',
+        loops: Math.floor(age * 10),
+        m: { loop_ms: round(100 + Math.sin(age * 1.7) * 2.5, 2) },
+      },
       /* Omitted rather than sent as zero, because the firmware omits it and a
          simulator held to a weaker contract stops being evidence. Zero dBm is
          an extraordinarily strong signal, so a panel fed zero for an

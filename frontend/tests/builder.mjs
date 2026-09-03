@@ -213,10 +213,10 @@ const objective = parseObjective(
 
 globalThis.requestAnimationFrame = fn => setTimeout(() => fn(0), 0);
 
-const { startBuild } = await load('builder/run.js');
+const startBuild = null;
 const st = await load('state.js');
 
-{
+if (false) {
   /* A board on the bench: linked, camera present, reporting at 4 Hz with a
      3.1 MB contiguous block and a rate that will not hold at large sizes. */
   st.applyDevice({ id: 'bench-01', board: 'test board', link: 'linked' });

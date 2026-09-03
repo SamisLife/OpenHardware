@@ -45,8 +45,12 @@
         <dd data-rail="net">––</dd>
       </div>
       <div class="fact">
-        <dt>Firmware</dt>
+        <dt>Harness</dt>
         <dd><span data-rail="fw">––</span> <span class="dim" data-rail="sha">––</span></dd>
+      </div>
+      <div class="fact">
+        <dt>App</dt>
+        <dd data-rail="app">––</dd>
       </div>
       <div class="fact">
         <dt>Slot</dt>
@@ -167,10 +171,9 @@
     </section>
 
     <!-- ---- the agent ------------------------------------------------
-         Ported from the predecessor project, which had this working against a
-         simulated board. Every number it attributes to the hardware is read
-         from live telemetry; the steps it cannot really perform are marked and
-         rendered differently. See js/builder/run.js. -->
+         Every number attributed to hardware comes from live telemetry. Builds
+         are produced by the loopback daemon, and only the human-gated flash
+         path can move one onto the board. -->
     <section class="panel panel--agent" id="agent" aria-labelledby="agent-h">
       <header class="panel__head">
         <h2 class="panel__title" id="agent-h">Work order</h2>

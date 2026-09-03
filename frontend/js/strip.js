@@ -81,6 +81,22 @@ const LANES = [
   },
 ];
 
+/** The first finite application metric in the retained window, if any. */
+export function appLane(buffer) {
+  for (const sample of buffer || []) {
+    if (sample?.gap) continue;
+    for (const key of Object.keys(sample || {})) {
+      if (key.startsWith('app.') && Number.isFinite(sample[key])) {
+        return {
+          id: key, label: `APP ${key.slice(4)}`, unit: '', weight: 1,
+          decimals: 2, ink: '#d8a657', base: [0, 1], auto: true,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 const PAPER = '#0f0e0d';
 const RULE = '#191715';
 const RULE_MINUTE = '#161413';
@@ -126,7 +142,7 @@ export function splitRuns(buffer, key) {
  */
 export function laneDomain(lane, buffer, limits = {}) {
   const scale = lane.scale || 1;
-  let [lo, hi] = lane.base;
+  let [lo, hi] = lane.auto ? [Infinity, -Infinity] : lane.base;
 
   const total = lane.total ? limits[lane.total] : null;
   if (Number.isFinite(total) && total > 0) hi = Math.max(hi, total * scale);
@@ -145,7 +161,16 @@ export function laneDomain(lane, buffer, limits = {}) {
     if (x > hi) hi = x;
   }
 
-  if (!(hi > lo)) hi = lo + 1;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) [lo, hi] = lane.base;
+  if (!(hi > lo)) {
+    const pad = Math.max(1, Math.abs(lo) * 0.05);
+    lo -= pad;
+    hi += pad;
+  } else if (lane.auto) {
+    const pad = (hi - lo) * 0.08;
+    lo -= pad;
+    hi += pad;
+  }
   return [lo, hi];
 }
 
@@ -256,12 +281,14 @@ export function mountStrip(el, { read } = {}) {
     ctx.fillStyle = PAPER;
     ctx.fillRect(plotX, 0, plotW, plotH);
 
-    const totalWeight = LANES.reduce((s, l) => s + l.weight, 0);
+    const dynamic = appLane(buffer);
+    const lanes = dynamic ? [...LANES, dynamic] : LANES;
+    const totalWeight = lanes.reduce((s, l) => s + l.weight, 0);
     let y = 0;
-    for (const lane of LANES) {
+    for (const lane of lanes) {
       const lh = (plotH * lane.weight) / totalWeight;
       drawLane(lane, buffer, limits, plotX, y, plotW, lh, gutter, xOf, now,
-               lane === LANES[LANES.length - 1]);
+               lane === lanes[lanes.length - 1]);
       y += lh;
 
       ctx.strokeStyle = SEAM;

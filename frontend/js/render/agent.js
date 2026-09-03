@@ -37,6 +37,7 @@ const STEP_ORDER = [
 
 let el = {};
 let handlers = {};
+let gateWasPending = false;
 /** n -> { node, sig } so an unchanged attempt is never rebuilt. */
 const built = new Map();
 
@@ -71,13 +72,15 @@ export function renderGate(state) {
   if (!el.gate) return;
   const g = state.gate;
   el.gate.hidden = !g;
-  if (!g) { el.gate.innerHTML = ''; return; }
+  if (!g) { el.gate.innerHTML = ''; gateWasPending = false; return; }
 
   el.gate.innerHTML = gateBlock({ gate: g }, g.requestedBy === 'agent' ? 'an agent asked' : null);
   if (g.state === 'pending') {
     el.gate.querySelector('[data-gate=approve]')?.addEventListener('click', () => handlers.onApprove?.(g));
     el.gate.querySelector('[data-gate=hold]')?.addEventListener('click', () => handlers.onHold?.(g));
+    if (!gateWasPending) el.gate.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   }
+  gateWasPending = g.state === 'pending';
 }
 
 export function renderWorkOrder(state) {
@@ -270,7 +273,7 @@ function metaLine(a) {
 }
 
 function tone(status) {
-  if (status === 'passed') return 'ok';
+  if (status === 'passed' || status === 'built') return 'ok';
   if (status === 'failed') return 'fault';
   if (status === 'running' || status === 'gated') return 'active';
   return 'muted';

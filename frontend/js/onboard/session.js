@@ -487,8 +487,9 @@ export class Session {
    * costs it whatever it was holding, so it is something asked for rather than
    * something that happens on the way past.
    */
-  async flash({ eraseAll = false } = {}) {
+  async flash({ eraseAll = false, imageBase = '/firmware/baseline/' } = {}) {
     if (!this.port) return this.fail('connect', 'no_port');
+    const runningSlot = this.state.hello?.slot || 'unknown';
 
     this.state.fault = null;
     this.state.found = null;
@@ -509,9 +510,9 @@ export class Session {
     this.rung('flash', 'active', 'fetching the image');
     let manifest, images;
     try {
-      manifest = await this.driver.fetchManifest();
+      manifest = await this.driver.fetchManifest(imageBase);
       this.state.manifest = manifest;
-      images = await this.driver.fetchImages(manifest);
+      images = await this.driver.fetchImages(manifest, imageBase);
     } catch (err) {
       const code = err.code === 'no_server' ? 'no_manifest' : err.code || 'fetch_failed';
       return this.fail('flash', code, err.message);
@@ -520,6 +521,21 @@ export class Session {
     const kb = (manifest.total_bytes || 0) / 1024;
     this.log(`${manifest.project || 'firmware'} ${manifest.version || ''} · `
            + `${manifest.parts.length} images · ${kb.toFixed(0)} KB · hashes verified`, 'meta');
+
+    let activation = null;
+    if (manifest.kind === 'candidate') {
+      if (manifest.activation_protocol !== 2) {
+        return this.fail('flash', 'no_manifest', 'candidate predates the self-confirming harness (protocol 2); rebuild it against the current harness');
+      }
+      const target = runningSlot === 'ota_0' ? 'ota_1' : 'ota_0';
+      const address = Number(manifest.targets?.[target]);
+      if (!Number.isInteger(address) || address <= 0 || images.length !== 1) {
+        return this.fail('flash', 'no_manifest', 'candidate manifest has no valid inactive OTA target');
+      }
+      images = images.map(image => ({ ...image, address }));
+      activation = { slot: target, sha: manifest.elf_sha8, buildId: manifest.build_id || null };
+      this.log(`candidate ${activation.buildId || manifest.elf_sha8} targets ${target}; factory is untouched`, 'meta');
+    }
 
     /* ---- phase two: write. From here the board is in play. ------------- */
     await this.closeLink();
@@ -553,7 +569,7 @@ export class Session {
     this.state.progress = null;
     this.state.writing = false;
     this.rung('flash', 'done', `${manifest.version || 'image'} written`);
-    return this.waitForBoot();
+    return this.waitForBoot(activation);
   }
 
   /**
@@ -564,7 +580,7 @@ export class Session {
    * fragile moment in the flow, so it gets an explicit patient recovery rather
    * than an assumption that the handle still works.
    */
-  async waitForBoot() {
+  async waitForBoot(activation = null) {
     this.rung('boot', 'active', 'board is resetting');
 
     const port = await this.driver.waitForBoard(this.port, {
@@ -577,6 +593,8 @@ export class Session {
     this.rung('boot', 'active', 'back on the bus');
     if (!(await this.openLink())) return this.fail('boot', 'no_open', this._openError);
 
+    if (activation) return this.activateCandidate(activation);
+
     this.rung('boot', 'done', 'back on the bus');
 
     /* Marked so that silence from here is reported as what it is. A board that
@@ -585,6 +603,64 @@ export class Session {
        differs. */
     this._justWritten = true;
     return this.identify();
+  }
+
+  /** Validate the inactive image, select it, then observe the candidate boot. */
+  async activateCandidate(activation) {
+    this.rung('boot', 'active', `validating ${activation.slot}`);
+    this.state.hello = null;
+    const helloWait = this.awaitHello(5000);
+    this.link?.send({ t: 'ping' }).catch(() => {});
+    const current = await helloWait;
+    if (!current) return this.fail('boot', 'no_hello', 'the current image did not return to activate the candidate');
+
+    const ackWait = this.awaitFrame('activate_ack', 5000);
+    const accepted = await this.link?.send({
+      t: 'activate', slot: activation.slot, sha: activation.sha,
+    });
+    if (!accepted) return this.fail('boot', 'link_dropped', 'the activation request did not reach the board');
+    const ack = await ackWait;
+    if (!ack?.ok) return this.fail('boot', 'flash_failed', ack?.err || 'the candidate image was not accepted');
+
+    this.log(`< activate_ack ${ack.slot} ${ack.sha || ''}`, 'frame');
+    this.rung('boot', 'active', `${activation.slot} selected; waiting for candidate boot`);
+    await sleep(400);
+    await this.closeLink();
+
+    const port = await this.driver.waitForBoard(this.port, {
+      onWait: (_n, remaining) =>
+        this.rung('boot', 'active', `waiting for candidate · ${Math.ceil(remaining / 1000)}s`),
+    });
+    if (!port) return this.fail('boot', 'no_reopen');
+    this.port = port;
+    if (!(await this.openLink())) return this.fail('boot', 'no_open', this._openError);
+
+    /* The port just reopened, which resets this board, and that reset is the
+       one a pending image has to survive: what comes back is the verdict. The
+       harness confirms itself the moment it is reporting and says so in its
+       hello. "valid" is the candidate kept; "factory" with the slot marked
+       aborted is the bootloader having put the baseline back. */
+    this.rung('boot', 'active', `${activation.slot} selected; reading what booted`);
+    this.state.hello = null;
+    const booted = this.awaitHello(HELLO_MS * 2);
+    this.link?.send({ t: 'ping' }).catch(() => {});
+    const hello = await booted;
+    if (!hello) return this.fail('boot', 'no_hello', 'nothing identified itself after activation');
+
+    const sha = String(hello.sha || '').toLowerCase();
+    if (hello.slot !== activation.slot || sha !== String(activation.sha || '').toLowerCase()) {
+      if (hello.aborted === activation.slot || hello.slot === 'factory') {
+        return this.fail('boot', 'rolled_back',
+          `${activation.slot} was abandoned by the bootloader; running ${hello.fw || 'firmware'} from ${hello.slot || '?'}`);
+      }
+      return this.fail('boot', 'flash_failed',
+        `expected ${activation.sha} in ${activation.slot}, found ${hello.sha || '?'} in ${hello.slot || '?'}`);
+    }
+
+    this.rung('boot', 'done',
+      `${activation.slot} active · ${hello.ota === 'valid' ? 'confirmed' : (hello.ota || 'state unknown')}`);
+    this._justWritten = true;
+    return this.identified(hello);
   }
 
   /* ---- 3. IDENTIFY ----------------------------------------------------- */
@@ -1094,7 +1170,9 @@ export class Session {
     /* Beats and image chunks arrive in their dozens and would drown the
        monitor. An image header still gets a line, so frames arriving stays
        visible. */
-    if (frame.t === 'img') {
+    if (frame.t === 'log' && frame.src === 'app') {
+      this.log(`app: ${frame.msg || ''}`, 'app');
+    } else if (frame.t === 'img') {
       this.log(`< img #${frame.seq} · ${frame.w}×${frame.h} · ${frame.bytes} bytes`, 'frame');
     } else if (frame.t !== 'beat' && frame.t !== 'imgd') {
       this.log(`< ${frame.t}`, 'frame');

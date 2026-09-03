@@ -130,6 +130,9 @@ bool hw_json_str(const char *json, const char *key, char *out, size_t out_len);
 /** Read a JSON boolean. Anything that is not literally `true` reads false. */
 bool hw_json_bool(const char *json, const char *key);
 
+/** Read a JSON integer. false when the key or a numeric value is absent. */
+bool hw_json_int(const char *json, const char *key, int *out);
+
 /* ------------------------------------------------------------------------ */
 /* what the board can say about itself                                       */
 /* ------------------------------------------------------------------------ */
@@ -249,8 +252,11 @@ bool hw_net_rssi(int *out);
  * lock for the whole image, which also stops two images from interleaving into
  * something no reader could separate.
  */
-void hw_proto_send_image(const uint8_t *jpeg, size_t len,
+bool hw_proto_send_image(const uint8_t *jpeg, size_t len,
                          uint32_t seq, int w, int h, int q);
+
+/** Make the next oversized frame report its cable-budget refusal at once. */
+void hw_proto_reset_image_budget_notice(void);
 
 /* ------------------------------------------------------------------------ */
 /* the camera — the part that can take the board down                        */
@@ -287,8 +293,8 @@ typedef enum {
 #define HW_CAM_JPEG_QUALITY 12
 
 /** Frame pacing, and the camera task's own tick. */
-#define HW_CAM_FRAME_MS    125
-#define HW_CAM_TICK_MS     25
+#define HW_CAM_FRAME_MS    40
+#define HW_CAM_TICK_MS     20
 
 /**
  * Hot-plug: how often the sensor is asked whether it is still there, and how
@@ -352,6 +358,18 @@ bool hw_camera_watch(void);
  */
 hw_cam_state_t hw_camera_probe(void);
 
+/** Create the one-deep configuration queue before inbound frames can arrive. */
+void hw_camera_init(void);
+
+/** Queue a whole camera request atomically; a newer request supersedes it. */
+bool hw_camera_request_config(const char *size, int quality);
+
+/** Apply one queued request on the camera task: 0 none, 1 applied, -1 refused. */
+int hw_camera_apply_pending(const char **err);
+
+/** Return already-captured frames after an acknowledged configuration change. */
+void hw_camera_drain_frames(void);
+
 /**
  * Grab one frame, put it on the wire, and give it back to the driver.
  *
@@ -370,6 +388,7 @@ hw_cam_state_t hw_camera_state(void);
 const char    *hw_camera_state_str(void);
 const char    *hw_camera_sensor(void);
 int            hw_camera_quality(void);
+const char    *hw_camera_size_name(void);
 
 /** Safe from any task: a volatile flag, read by the owner on its next tick. */
 void hw_camera_set_streaming(bool on);
@@ -398,3 +417,25 @@ bool hw_camera_fps(float *out);
  */
 uint8_t   hw_prov_cam_tries(void);
 esp_err_t hw_prov_set_cam_tries(uint8_t n);
+
+/** The application crash-loop counter, with the same durable ordering. */
+uint8_t   hw_prov_app_tries(void);
+esp_err_t hw_prov_set_app_tries(uint8_t n);
+
+/* ------------------------------------------------------------------------ */
+/* the untrusted application layer                                           */
+/* ------------------------------------------------------------------------ */
+
+/** Read and sanitise identity before the first hello is sent. */
+void hw_app_init(void);
+
+/** Start only after the camera probe has returned and disarmed its counter. */
+void hw_app_start(void);
+
+const char *hw_app_name(void);
+const char *hw_app_version(void);
+const char *hw_app_state_str(void);
+uint8_t     hw_app_crash_tries(void);
+
+/** Build the bounded `"app":{...}` member placed in every beat. */
+void hw_app_beat_json(char *out, size_t cap);

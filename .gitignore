@@ -30,6 +30,16 @@ firmware/harness/managed_components/
 # firmware change, to save a step that is already a script.
 firmware/dist/
 
+# The default application source is committed under firmware/apps/default.
+# Drafts and compiled artifacts belong to a local iteration session; immutable
+# here means the daemon never rewrites an id, not that binaries enter git.
+firmware/workspace/
+firmware/artifacts/
+firmware/baseline/
+firmware/harness/components/app/*.c
+firmware/harness/components/app/*.h
+firmware/harness/components/app/app_sources.cmake
+
 # ---- everything else -------------------------------------------------------
 # Bytecode from tools/tests. Written on import, never edited, and specific to
 # whichever Python happened to run it.

@@ -128,7 +128,9 @@ function renderLadder(state) {
 
 const LEDE = {
   idle: 'Connect a board over USB, or run a simulated one. Nothing is installed '
-      + 'and nothing is written to the board.',
+      + 'and nothing is written to the board. Choosing the port is a person\'s click; '
+      + 'once the board is linked, an agent in this browser can drive it through the '
+      + 'page\'s tools.',
   working: 'Working. The board is narrating itself on the right.',
   decide: '',
   fault: '',
@@ -156,13 +158,17 @@ function renderDecision(state) {
     found = `This board is already running ${running}.`;
 
     if (pub?.action === 'differs' && pub.version) {
-      found += ` The published image is <strong>${esc(pub.version)}</strong>,
+      found += ` The known-safe baseline is <strong>${esc(pub.version)}</strong>,
                 and the two are built from different source.`;
     } else if (pub?.action === 'same') {
-      found += ' It matches the published image.';
+      found += ' It matches the known-safe baseline.';
     }
-    ask = 'Carrying on uses what is already there and writes nothing. Writing a '
-        + 'fresh copy replaces it, along with anything the board had stored.';
+    /* The buttons are named, because the reader may be a model that has the
+       words and not the layout: which one is the ordinary answer has to be
+       in the sentence, not in the button's weight. */
+    ask = '"Continue with it" keeps what is already there and writes nothing; it is '
+        + 'the normal choice. "Restore baseline" writes the known-safe factory image; '
+        + 'stored data is erased only when the erase option is selected.';
   } else if (f.lines) {
     /* Counted, not characterised. Firmware this page cannot read is usually
        not another version of this project — it is arbitrary — and naming a
@@ -206,7 +212,8 @@ function renderNetworkDecision(state) {
     <p class="decide__found">${found}</p>
     <p class="decide__ask">Telemetry runs over the cable either way — a network is
       what lets the board be reached once the cable is gone. The radio is 2.4 GHz
-      only. Nothing below this step depends on the answer.</p>`;
+      only. Nothing below this step depends on the answer; "Skip — use the cable"
+      is a complete one.</p>`;
 }
 
 function renderHead(state) {
@@ -230,10 +237,10 @@ function renderHead(state) {
        reach for it. */
     notice = `<p class="notice">This board is running
        <strong>${esc(state.published.running)}</strong>.
-       The published image is <strong>${esc(state.published.version)}</strong>,
+        The known-safe baseline is <strong>${esc(state.published.version)}</strong>,
        and their hashes differ. Keeping what is on the board is fine.</p>`;
   } else if (state.published?.action === 'same') {
-    notice = `<p class="notice notice--quiet">Running the published image,
+    notice = `<p class="notice notice--quiet">Running the known-safe baseline,
        ${esc(state.published.version)}.</p>`;
   }
 
@@ -329,7 +336,7 @@ function renderActions(state, blocked) {
 
   if (state.phase === 'decide') {
     const version = state.published?.version;
-    const write = version ? `Write ${version}` : 'Write firmware';
+    const write = version ? `Write baseline ${version}` : 'Write baseline';
     const known = !!state.found?.known;
 
     /* Which one leads depends on what is already there, and it is never the
@@ -341,7 +348,7 @@ function renderActions(state, blocked) {
       add('button', 'Continue with it', {
         cls: 'btn btn--primary', on: () => handlers.onContinue?.(),
       });
-      add('button', version ? `Re-flash ${version}` : 'Re-flash', {
+      add('button', version ? `Restore baseline ${version}` : 'Restore baseline', {
         cls: 'btn', on: () => handlers.onFlash?.(),
       });
     } else {
@@ -377,7 +384,7 @@ function renderActions(state, blocked) {
        elsewhere, because writing over a board costs it whatever it was
        holding and that is not a decision to nudge somebody into. */
     if (state.hasPort) {
-      add('button', 'Write this firmware', {
+      add('button', 'Write baseline', {
         cls: writeFixesIt ? 'btn btn--primary' : 'btn',
         on: () => handlers.onFlash?.(),
       });
@@ -402,11 +409,10 @@ function renderActions(state, blocked) {
      running costs it whatever it was holding, so the label names what it does
      and it does not get the primary weight. */
   if (state.hasPort) {
-    /* Named once there is a name. "Write firmware" leaves somebody to wonder
-       which firmware; "Write 0.11.0" is the same click with the answer on it. */
+    /* Named once there is a name so the recovery target is explicit. */
     const label = state.published?.version
-      ? `Write ${state.published.version}`
-      : 'Write firmware';
+      ? `Write baseline ${state.published.version}`
+      : 'Write baseline';
     add('button', label, {
       cls: state.published?.action === 'differs' ? 'btn btn--primary' : 'btn',
       on: () => handlers.onFlash?.(),

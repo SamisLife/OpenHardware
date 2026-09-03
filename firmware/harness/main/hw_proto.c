@@ -28,11 +28,13 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -221,21 +223,39 @@ static char s_b64[HW_IMG_CHUNK_RAW * 4 / 3 + 8];
  * may call this" would work until the day something else did. */
 static SemaphoreHandle_t s_img_lock = NULL;
 
-void hw_proto_send_image(const uint8_t *jpeg, size_t len,
+static uint32_t s_oversize_since_report = 0;
+static int64_t s_last_oversize_report_us = 0;
+
+void hw_proto_reset_image_budget_notice(void)
+{
+    s_oversize_since_report = 0;
+    s_last_oversize_report_us = 0;
+}
+
+bool hw_proto_send_image(const uint8_t *jpeg, size_t len,
                          uint32_t seq, int w, int h, int q)
 {
-    if (!jpeg || !len) return;
+    if (!jpeg || !len) return false;
 
     if (len > HW_IMG_MAX_BYTES) {
         /* Saying why there is no picture costs one frame. Sending it would
            occupy the cable long enough for the heartbeat to look like it
-           stopped, turning one oversized capture into an apparently dead
-           board. */
-        hw_proto_sendf("status",
-            "\"stage\":\"frame_too_large\","
-            "\"detail\":\"%u bytes is past the %u byte cable budget\"",
-            (unsigned)len, (unsigned)HW_IMG_MAX_BYTES);
-        return;
+           stopped. Repeating that explanation for every refused capture would
+           create the same congestion, so it is emitted at most once a second. */
+        s_oversize_since_report++;
+        const int64_t now = esp_timer_get_time();
+        if (s_last_oversize_report_us == 0
+            || now - s_last_oversize_report_us >= 1000000LL) {
+            hw_proto_sendf("status",
+                "\"stage\":\"frame_too_large\","
+                "\"detail\":\"%lu frame%s refused; latest %u bytes is past the %u byte cable budget\"",
+                (unsigned long)s_oversize_since_report,
+                s_oversize_since_report == 1 ? "" : "s",
+                (unsigned)len, (unsigned)HW_IMG_MAX_BYTES);
+            s_oversize_since_report = 0;
+            s_last_oversize_report_us = now;
+        }
+        return false;
     }
 
     const size_t chunks = (len + HW_IMG_CHUNK_RAW - 1) / HW_IMG_CHUNK_RAW;
@@ -263,6 +283,7 @@ void hw_proto_send_image(const uint8_t *jpeg, size_t len,
     }
 
     if (s_img_lock) xSemaphoreGive(s_img_lock);
+    return true;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -415,6 +436,30 @@ bool hw_json_bool(const char *json, const char *key)
     while (*p == ' ' || *p == '\t') p++;
 
     return strncmp(p, "true", 4) == 0;
+}
+
+bool hw_json_int(const char *json, const char *key, int *out)
+{
+    if (!json || !key || !out) return false;
+
+    char pattern[40];
+    int pn = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (pn < 0 || pn >= (int)sizeof(pattern)) return false;
+
+    const char *p = strstr(json, pattern);
+    if (!p) return false;
+    p += pn;
+
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    char *end = NULL;
+    long value = strtol(p, &end, 10);
+    if (end == p) return false;
+    *out = (int)value;
+    return true;
 }
 
 bool hw_json_str(const char *json, const char *key, char *out, size_t out_len)

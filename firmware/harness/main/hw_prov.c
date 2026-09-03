@@ -26,6 +26,7 @@ static const char *TAG = "hw_prov";
 #define KEY_PSK    "psk"
 #define KEY_SERVER "server"
 #define KEY_CAM    "cam_tries"
+#define KEY_APP    "app_tries"
 
 esp_err_t hw_prov_init(void)
 {
@@ -147,5 +148,36 @@ esp_err_t hw_prov_set_cam_tries(uint8_t n)
 
     nvs_close(h);
     if (err != ESP_OK) ESP_LOGW(TAG, "camera counter not stored: %s", esp_err_to_name(err));
+    return err;
+}
+
+/* ------------------------------------------------------------------------ */
+/* the application crash counter                                             */
+/* ------------------------------------------------------------------------ */
+
+uint8_t hw_prov_app_tries(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(HW_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
+
+    uint8_t n = 0;
+    if (nvs_get_u8(h, KEY_APP, &n) != ESP_OK) n = 0;
+    nvs_close(h);
+    return n;
+}
+
+esp_err_t hw_prov_set_app_tries(uint8_t n)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(HW_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_u8(h, KEY_APP, n);
+    /* The app can panic before its first loop returns. Committing before it
+       starts is what leaves evidence for the next boot to read. */
+    if (err == ESP_OK) err = nvs_commit(h);
+
+    nvs_close(h);
+    if (err != ESP_OK) ESP_LOGW(TAG, "app counter not stored: %s", esp_err_to_name(err));
     return err;
 }

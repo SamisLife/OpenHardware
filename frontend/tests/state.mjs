@@ -244,7 +244,7 @@ const sample = (t, extra = {}) => ({
 
   S.resetAttempts();
   ok('abandoning a work order forgets the attempts', S.state.attempts.length === 0);
-  ok('and the images', S.state.firmware.length === 0);
+  ok('but keeps the independently built image history', S.state.firmware.length === 1);
   /* The board is still doing whatever it was doing. */
   ok('but says nothing about the hardware', S.state.peripherals.known === true);
   ok('and leaves the record of it intact', S.state.telemetry.buffer.length === 1);

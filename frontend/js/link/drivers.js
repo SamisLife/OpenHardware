@@ -59,6 +59,9 @@ export const webSerialDriver = {
  */
 export function simulatedDriver(scene = '') {
   let board = null;
+  let boot = 0;
+  let runningSha = '5111111111111111';
+  let publishedSha = '8222222222222222';
 
   return {
     simulated: true,
@@ -76,7 +79,11 @@ export function simulatedDriver(scene = '') {
     async openPort(_port, handlers) {
       const { SimBoard } = await import('./sim.js');
       board?.detach();
-      board = new SimBoard(scene);
+      boot++;
+      board = new SimBoard(scene, {
+        sha: runningSha,
+        bootId: `sim${String(boot).padStart(5, '0')}`,
+      });
       return board.attach(handlers);
     },
 
@@ -95,7 +102,8 @@ export function simulatedDriver(scene = '') {
       await sleep(180);
       return {
         project: 'Simulated firmware',
-        version: '0.8.0-sim',
+        version: '0.14.0-sim',
+        elf_sha8: publishedSha,
         chip: 'esp32s3',
         total_bytes: 1064 * 1024,
         parts: [
@@ -135,6 +143,7 @@ export function simulatedDriver(scene = '') {
       /* The board really does go away and come back. */
       board?.detach();
       board = null;
+      runningSha = publishedSha;
       await sleep(600);
       return { chip: 'ESP32-S3 (simulated)' };
     },

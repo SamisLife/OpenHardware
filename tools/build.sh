@@ -22,6 +22,12 @@ CCACHE_VOL="openhardware-ccache"
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 HARNESS="$ROOT/firmware/harness"
 
+# The compiler component is scratch space. A fresh clone has no generated app
+# source yet, so a direct build starts from the committed minimal baseline.
+if ! ls "$HARNESS/components/app/"*.c >/dev/null 2>&1; then
+  cp "$ROOT/firmware/apps/default/app.c" "$HARNESS/components/app/app.c"
+fi
+
 # -----------------------------------------------------------------------------
 # REASON ONE: set-target runs fullclean first.
 #

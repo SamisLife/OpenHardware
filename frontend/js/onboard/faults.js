@@ -267,6 +267,17 @@ export const FAULTS = {
         + 'a wifi_ok or wifi_fail, or carry on over the cable.',
   },
 
+  rolled_back: {
+    observed: 'The board came back on a different image than the one just activated. '
+            + 'The bootloader abandoned the candidate slot and booted the previous image.',
+    causes: [
+      'the candidate reset before its harness could confirm the image',
+      'the candidate was built before the harness confirmed itself at boot',
+    ],
+    next: 'Read the reset reason and the wire log, fix what the candidate did at boot, '
+        + 'build again, and flash the new build.',
+  },
+
   link_dropped: {
     observed: 'The link to the board closed part-way through.',
     causes: ['the cable moved', 'the board reset'],

@@ -33,7 +33,7 @@ const { mountTools, summarize, configEffector } = await load('webmcp.js');
 const { approvePending, holdPending, pendingGate } = await load('builder/gate.js');
 const { SimBoard } = await load('link/sim.js');
 const { createFeed } = await load('link/feed.js');
-const { startBuild } = await load('builder/run.js');
+const startBuild = null;
 
 /**
  * document.modelContext, as the standard describes it and as the tests need
@@ -99,15 +99,23 @@ const link = board.attach({ onFrame: f => feed.handleFrame(f), onText: () => {} 
 
 let flashed = 0;
 let provisioned = null;
-let submitted = null;
 const fx = {
   setCamera: on => link.send({ t: 'cam', on }),
   setConfig: configEffector(obj => link.send(obj)),
-  flash: async () => { flashed++; },
+  flash: async () => { flashed++; return { flashDone: true, phase: 'done', fault: null }; },
+  build: {
+    get: async id => ({ ok: true, id, status: 'built', app: { name: 'test', version: '1.0' }, image: { artifact: `/firmware/artifacts/${id}/`, activation_protocol: 2 } }),
+    baseline: async () => ({ ok: true, version: '0.14.0', app: { name: 'default', version: '1.0' } }),
+    artifactBase: id => `/firmware/artifacts/${id}/`,
+    baselineBase: '/firmware/baseline/',
+  },
   provision: async (ssid, psk) => { provisioned = { ssid, hasPsk: !!psk }; },
-  submitWorkOrder: goal => { submitted = goal; return { ok: true }; },
   manifest: async () => ({ version: '0.12.0', project: 'openhardware_harness', elf_sha8: 'abc', total_bytes: 880384, parts: [] }),
   source: () => 'sim',
+  /* A stand-in for the session's guide: one phase, one next step. */
+  bringUp: () => ({ phase: 'idle', next: 'Press "Connect a board" and choose the port.',
+                    waitingOn: { who: 'person', what: 'Press "Connect a board" and choose the port.', options: [] },
+                    rungs: [], board: {}, fault: null, howItWorks: ['one'] }),
 };
 
 const mc = fakeModelContext();
@@ -118,8 +126,9 @@ const call = async (name, input = {}, signal) => {
   return tool.execute(input, { signal });
 };
 
-const READ = ['capture_frame', 'get_board', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_work_order'];
-const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment', 'set_camera', 'set_camera_config', 'submit_work_order', 'watch_for'];
+const READ = ['capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
+const PAGE = ['build_firmware', 'record_attempt'];
+const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baseline', 'run_experiment', 'set_camera', 'set_camera_config', 'watch_for'];
 
 /* ------------------------------------------------------------------------ */
 /* registration follows the link                                             */
@@ -127,10 +136,25 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
 
 {
   ok('the registry was found', mounted.available === true);
+
+  /* Asked before the first beat has marked the link, so the answer is the
+     one a caller gets on a page nobody has connected yet. */
+  const early = await call('get_board');
+  ok('an unlinked get_board says which step the page waits on and what to do',
+     early.link === 'offline' && early.bringUp?.phase === 'idle' && /Connect a board/.test(early.bringUp?.next || ''),
+     JSON.stringify(early.bringUp));
+  const refused = await call('capture_frame');
+  ok('and a refusal for want of a board says what a person must press',
+     refused.ok === false && refused.error === 'no board is linked' && /Connect a board/.test(refused.next || ''),
+     JSON.stringify(refused));
+  const g = await call('get_bring_up');
+  ok('get_bring_up hands over the whole guide', g.ok === true && g.phase === 'idle' && g.waitingOn?.who === 'person' && Array.isArray(g.howItWorks));
   ok('read tools are registered before any board is linked',
      READ.every(n => mc.names().includes(n)), mc.names().join(','));
-  ok('and no write tool is', !WRITE.some(n => mc.names().includes(n)), mc.names().join(','));
+  ok('page-only tools are also registered without a board', PAGE.every(n => mc.names().includes(n)), mc.names().join(','));
+  ok('and no board write tool is', !WRITE.some(n => mc.names().includes(n)), mc.names().join(','));
   ok('every read tool says so', READ.every(n => mc.get(n).annotations?.readOnlyHint === true));
+  ok('page-only tools admit they mutate local state', PAGE.every(n => !mc.get(n).annotations?.readOnlyHint));
 
   /* The board announces itself; the feed marks the link; the writes appear. */
   await wait(400);
@@ -139,9 +163,9 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
      mc.names().join(','));
   ok('and none of them claims to be read-only', WRITE.every(n => !mc.get(n).annotations?.readOnlyHint));
   ok('every tool carries a short title for the panel',
-     [...READ, ...WRITE].every(n => typeof mc.get(n).title === 'string' && mc.get(n).title.length > 0));
+     [...READ, ...PAGE, ...WRITE].every(n => typeof mc.get(n).title === 'string' && mc.get(n).title.length > 0));
   ok('and the page records what is registered, for the panel',
-     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length + WRITE.length,
+     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length + PAGE.length + WRITE.length,
      JSON.stringify(st.state.ui.agent.tools.map(t => `${t.name}:${t.registered}`)));
   ok('the registry was told each time the list moved', mc.changes >= READ.length + WRITE.length, mc.changes);
 
@@ -150,9 +174,9 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   st.flushNow();
   await wait(10);
   ok('losing the link withdraws every write tool', !WRITE.some(n => mc.names().includes(n)), mc.names().join(','));
-  ok('and leaves the read tools', READ.every(n => mc.names().includes(n)));
+  ok('and leaves the read and page tools', [...READ, ...PAGE].every(n => mc.names().includes(n)));
   ok('and the panel is told the writes are withdrawn',
-     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length);
+     st.state.ui.agent.tools.filter(t => t.registered).length === READ.length + PAGE.length);
   ok('which the registry was told about', mc.changes > before);
 
   st.applyDevice({ link: 'linked' });
@@ -172,6 +196,9 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   ok('a result carries the source', r.source === 'sim', r.source);
   ok('and the link state', r.link === 'linked', r.link);
   ok('the board is identified from what it reported', r.device.board === 'Simulated board', r.device.board);
+  ok('and the bootloader\'s view of the image travels with it', r.device.ota === 'factory' && r.device.aborted === null,
+     JSON.stringify([r.device.ota, r.device.aborted]));
+  ok('a linked board has no bring-up left to describe', r.bringUp === null);
   ok('and the ladder is in the reply with the cost of each size',
      r.ladder.length === 10 && r.ladder.every(s => s.framebufferBytes > 0));
 
@@ -275,7 +302,7 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
 /* ------------------------------------------------------------------------ */
 
 {
-  const p = call('flash_image', {});
+  const p = call('flash_image', { buildId: 'b1' });
   await wait(20);
   ok('flash_image waits on a gate', pendingGate() !== null && st.state.gate?.state === 'pending');
   ok('and names the agent as the one asking', st.state.gate?.requestedBy === 'agent');
@@ -287,7 +314,7 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   ok('and still nothing was written', flashed === 0);
   ok('the gate is cleared', pendingGate() === null && st.state.gate === null);
 
-  const p2 = call('flash_image', { eraseAll: true });
+  const p2 = call('flash_image', { buildId: 'b1' });
   await wait(20);
   const p3 = call('provision_wifi', { ssid: 'bench' });
   const busy = await p3;
@@ -321,11 +348,13 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
      lim.limits.some(l => l.key === 'camera.max_size_at_10fps' && l.by === 'agent' && l.committed === false));
 
   const imgs = await call('get_images');
-  ok('the published image is reported', imgs.ok && imgs.published?.version === '0.12.0');
+  ok('the baseline image is reported', imgs.ok && imgs.baseline?.version === '0.12.0');
 
-  st.applyWorkOrder({ status: 'passed' });
-  const sub = await call('submit_work_order', { goal: 'highest resolution that holds at least 10 fps' });
-  ok('a goal is handed to the loop', sub.ok === true && /10 fps/.test(submitted));
+  const recorded = await call('record_attempt', {
+    observed: 'VGA held 10 fps', hypothesis: 'VGA fits the link budget',
+    change: 'kept VGA', result: 'stable', verdict: 'passed',
+  });
+  ok('an agent can append its observed reasoning', recorded.ok === true && recorded.status === 'passed');
 
   const wo = await call('get_work_order');
   ok('the work order tool returns the same attempts the human sees',
@@ -373,7 +402,7 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
   ok('without document.modelContext nothing is registered', none.available === false && none.names().length === 0);
   ok('and the page records that tools are unavailable, for the hint', st.state.ui.agent.available === false);
   ok('and still publishes the catalogue, none of it registered',
-     st.state.ui.agent.tools.length === READ.length + WRITE.length && st.state.ui.agent.tools.every(t => t.registered === false),
+     st.state.ui.agent.tools.length === READ.length + PAGE.length + WRITE.length && st.state.ui.agent.tools.every(t => t.registered === false),
      JSON.stringify(st.state.ui.agent.tools.map(t => t.registered)));
 }
 
@@ -396,7 +425,8 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'run_experiment'
 /* the loop with a real effector                                             */
 /* ------------------------------------------------------------------------ */
 
-{
+/* Retained as historical coverage for the removed browser-side search loop. */
+if (false) {
   st.applyWorkOrder(null);
   st.resetAttempts();
   st.applyPeripherals({ cfg: true });

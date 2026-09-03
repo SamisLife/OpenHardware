@@ -321,6 +321,7 @@ body[data-view="onboard"] .console {
 .wire__line[data-kind="meta"]  .wire__x { color: var(--c-ink-2); }
 .wire__line[data-kind="error"] .wire__x { color: var(--c-red); }
 .wire__line[data-kind="bad"]   .wire__x { color: var(--c-amber); }
+.wire__line[data-kind="app"]   .wire__x { color: var(--c-amber); }
 
 /* ---- measured progress -------------------------------------------------
    The flash rung is the only place in this flow with a real number behind a

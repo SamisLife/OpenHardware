@@ -72,7 +72,7 @@ export function loadEsptool(url = ESPTOOL_URL) {
 /* the manifest                                                              */
 /* ------------------------------------------------------------------------ */
 
-export async function fetchManifest(base = '/firmware/dist/') {
+export async function fetchManifest(base = '/firmware/baseline/') {
   const url = new URL('manifest.json', new URL(base, location.origin));
 
   let res;
@@ -152,7 +152,7 @@ export async function sha256Hex(bytes) {
  * download fails while the board is still in a known-good state. Fetched in
  * parallel because they are independent and there are only a handful.
  */
-export async function fetchImages(manifest, base = '/firmware/dist/') {
+export async function fetchImages(manifest, base = '/firmware/baseline/') {
   const root = new URL(base, location.origin);
 
   return Promise.all(manifest.parts.map(async part => {

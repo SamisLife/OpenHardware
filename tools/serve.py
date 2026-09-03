@@ -49,7 +49,7 @@ def main():
         print('serving %s with Cache-Control: no-store' % ROOT)
         print()
         print('    frontend  http://localhost:%d/frontend/' % port)
-        print('    manifest  http://localhost:%d/firmware/dist/manifest.json' % port)
+        print('    baseline  http://localhost:%d/firmware/baseline/manifest.json' % port)
         print()
         try:
             httpd.serve_forever()
