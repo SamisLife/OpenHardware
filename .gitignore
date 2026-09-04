@@ -63,3 +63,14 @@ Thumbs.db
 #     Pins component versions. Without it "the same source" builds against
 #     whatever the registry is serving today.
 # ============================================================================
+
+# ---- internal working notes ------------------------------------------------
+# Design notes, bug post-mortems and handoffs written while building this.
+# They are candid about what went wrong and about what is still unfinished,
+# which is useful to whoever is working on it and is not what a reader of the
+# public repository is looking for. Ignored rather than deleted: an accidental
+# `git add -A` is the only realistic way they would ever ship.
+analysis/
+HANDOFF.md
+HANDOFF-NEXT.md
+NOTES.md
