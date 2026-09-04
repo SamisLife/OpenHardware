@@ -391,21 +391,3 @@ uint8_t     hw_app_crash_tries(void);
 /** Build the bounded `"app":{...}` member placed in every beat. */
 void hw_app_beat_json(char *out, size_t cap);
 
-/* ------------------------------------------------------------------------ */
-/* the expansion I2C header                                                  */
-/* ------------------------------------------------------------------------ */
-
-/** Default lines on the XIAO ESP32S3: D4 and D5. Port 1 belongs to the camera. */
-#define HW_I2C_DEFAULT_SDA 5
-#define HW_I2C_DEFAULT_SCL 6
-#define HW_I2C_SCAN_FIRST  0x08
-#define HW_I2C_SCAN_LAST   0x77
-
-/**
- * Probe the header for anything that acknowledges, from a task that exists
- * only for the scan, and answer with one `scan_ack`. Safe from any task.
- *
- * ESP_ERR_INVALID_ARG for a pin the camera or the USB peripheral owns,
- * ESP_ERR_INVALID_STATE while a scan is already running.
- */
-esp_err_t hw_i2c_request_scan(int sda, int scl);

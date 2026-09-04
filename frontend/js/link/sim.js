@@ -275,22 +275,7 @@ export class SimBoard {
 
   /* ---- inbound --------------------------------------------------------- */
 
-  /**
-   * The expansion header, probed. Answered after about the time a real scan
-   * takes, with one address that only acknowledges and one the silicon names,
-   * so both the page's question and its certainty can be rehearsed.
-   */
-  scan(obj) {
-    const sda = Number.isInteger(obj?.sda) ? obj.sda : 5;
-    const scl = Number.isInteger(obj?.scl) ? obj.scl : 6;
-    this.after(150, () => this.emit({
-      t: 'scan_ack', ok: true, bus: 'i2c0', sda, scl, ms: 148,
-      found: this.hasCamera
-        ? [{ addr: 0x3c }, { addr: 0x76, id: 'BME280' }]
-        : [{ addr: 0x68, id: 'MPU6050' }],
-    }));
-  }
-
+  
   receive(obj) {
     if (!obj || this.gone) return;
     if (obj.t === 'ping') return this.sendHello();
@@ -302,7 +287,6 @@ export class SimBoard {
       return this.emit({ t: 'cam_ack', on });
     }
     if (obj.t === 'cfg') return this.configure(obj);
-    if (obj.t === 'scan') return this.scan(obj);
   }
 
   /* ---- the model ------------------------------------------------------- */

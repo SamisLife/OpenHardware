@@ -25,7 +25,7 @@ import {
   applyFirmware, applyWorkOrder, resetAttempts,
 } from './state.js';
 import {
-  applyWiring, applyScan, confirmPart, ignorePart, keepPart, removePart, addPart, restoreWiring, waitForState,
+  removePart, addPart, restoreWiring, waitForState,
 } from './state.js';
 import { mountStrip } from './strip.js';
 import { mountRail, renderRail } from './render/rail.js';
@@ -124,10 +124,6 @@ mountPeripherals($('#vitals'), {
   onCamera: on => chooseCamera(on),
   /* Everything below is a person's: the page asks, the person answers, and
      no tool can answer for them. */
-  onScan: () => scanBus(),
-  onConfirm: (key, name) => confirmPart(key, name),
-  onIgnore: key => ignorePart(key),
-  onKeep: key => keepPart(key),
   onRemove: key => removePart(key),
   onAdd: part => addPart(part),
 });
@@ -161,32 +157,6 @@ function chooseCamera(on) {
   return Promise.resolve();
 }
 
-/**
- * Ask the board what answers on its I2C header, and wait for the answer.
- *
- * Bounded, because firmware from before the scan command never answers, and
- * a page waiting forever for it would show "scanning…" forever. The answer
- * itself lands through the feed, which is where the wiring list is folded.
- */
-async function scanBus({ sda, scl } = {}) {
-  if (!link?.open) return { ok: false, error: 'no board is linked' };
-  const before = state.wiring.scan;
-  applyWiring({ scanning: true });
-  const req = { t: 'scan' };
-  if (Number.isInteger(sda)) req.sda = sda;
-  if (Number.isInteger(scl)) req.scl = scl;
-  try { await link.send(req); }
-  catch (err) { applyWiring({ scanning: false }); return { ok: false, error: err.message }; }
-  const answered = await waitForState(s => s.wiring.scan !== before, { timeoutMs: 6000 });
-  if (!answered) {
-    /* Recorded as a failed scan rather than as nothing. A timeout alone does
-       not distinguish old firmware, a request that never arrived, a blocked
-       scan task or a reply that could not be parsed. */
-    applyScan({ ok: false, err: 'no_answer', at: Date.now() });
-    return { ok: false, error: 'no scan_ack arrived within 6 seconds; compare the board rxBytes before and after the request' };
-  }
-  return state.wiring.scan;
-}
 
 /** The board whose wiring memory is loaded, so a change of board reloads. */
 let wiringFor = null;
@@ -208,10 +178,7 @@ function restoreWiringFor(s) {
 /** Only what a person said is worth remembering; what the board said it will say again. */
 function rememberWiring(s) {
   if (!wiringFor) return;
-  writePref(`wiring.${wiringFor}`, {
-    parts: s.wiring.parts.filter(p => p.how === 'declared' || p.confirmedBy === 'person'),
-    ignored: s.wiring.ignored,
-  });
+  writePref(`wiring.${wiringFor}`, { parts: s.wiring.parts });
 }
 
 /**
@@ -508,7 +475,6 @@ function goLive(s) {
      before the answer lands and only genuinely new addresses raise a
      question. Firmware without the command never answers; the ask times
      out quietly. */
-  scanBus().catch(() => {});
 }
 
 /* ------------------------------------------------------------------------ */
@@ -648,7 +614,6 @@ const toolFx = {
     source: () => (simulated ? 'sim' : 'usb'),
     /* Where bring-up stands, for a caller that cannot see the ladder. */
     bringUp: () => (session ? describeBringUp(session.state) : null),
-    scan: opts => scanBus(opts),
 };
 mountTools({ fx: toolFx });
 

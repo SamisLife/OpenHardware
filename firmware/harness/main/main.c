@@ -394,22 +394,6 @@ static void on_frame(const char *type, const char *json)
         return;
     }
 
-    /* A scan occupies the header for a few hundred milliseconds and answers
-       once, from its own task, so the wire keeps its cadence meanwhile. Pins
-       default to the header's; a request naming others is checked against
-       what the camera and the USB peripheral own before anything is touched. */
-    if (strcmp(type, "scan") == 0) {
-        int sda = HW_I2C_DEFAULT_SDA, scl = HW_I2C_DEFAULT_SCL;
-        hw_json_int(json, "sda", &sda);
-        hw_json_int(json, "scl", &scl);
-        const esp_err_t err = hw_i2c_request_scan(sda, scl);
-        if (err != ESP_OK) {
-            hw_proto_sendf("scan_ack", "\"ok\":false,\"err\":\"%s\",\"sda\":%d,\"scl\":%d",
-                           err == ESP_ERR_INVALID_STATE ? "busy" : esp_err_to_name(err), sda, scl);
-        }
-        return;
-    }
-
     if (strcmp(type, "cfg") == 0) {
         char size[12] = {0};
         int quality = hw_camera_quality();

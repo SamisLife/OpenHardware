@@ -27,7 +27,7 @@
 
 import {
   state,
-  applyDevice, applyFirmware, applyFrame, applyLimits, applyPeripherals, applyUi, applyScan,
+  applyDevice, applyFirmware, applyFrame, applyLimits, applyPeripherals, applyUi,
   pushTelemetry, pushGap,
 } from '../state.js';
 
@@ -100,7 +100,6 @@ export function createFeed({
       case 'status': return onStatus(frame);
       /* What answered on the header. Folded into the wiring list by the
          model, which is where the questions for a person come from. */
-      case 'scan_ack': return applyScan({ ...frame, at: Date.now() });
       case 'log': return onLog?.({ src: frame.src || null, msg: frame.msg || '' });
       default: return;
     }

@@ -1,6 +1,25 @@
 /* ============================================================================
    webmcp.js — the page as a toolbelt.
    ----------------------------------------------------------------------------
+   THE WEBMCP CALL THIS FILE IS BUILT AROUND
+
+   Every tool below is registered with the standard API, one call per tool:
+
+       document.modelContext.registerTool({
+         name: "get_board",
+         description: "Identity and capabilities of the board this page is attached to",
+         inputSchema: { type: "object", properties: {}, additionalProperties: false },
+         execute: async (input) => ({ ok: true, device: { ... } }),
+       });
+
+   The call site is `register()` near the bottom of this file. It goes through
+   a resolved `mc` rather than naming the document again, for two reasons: the
+   registry moved from navigator to document while this was being written and
+   a browser still shipping the old spelling has an agent in it all the same,
+   and the tests hand in their own registry to drive the whole belt without a
+   browser. `mc` is `document.modelContext` in every real browser.
+
+   ----------------------------------------------------------------------------
    The reasoning lives in the browser's agent. This page is the instrument the
    human watches and, through document.modelContext, the set of tools the
    agent reaches for — and both see the same board at the same moment, because
@@ -406,50 +425,19 @@ function readTools(fx) {
 
     {
       name: 'get_wiring',
-      title: 'What is attached to the board, and how that is known',
+      title: 'What a person says is wired to the board',
       description:
-        'The wiring list: every part attached beyond the board itself, each with how it is known. '
-        + '"detected" means the board found it on its I2C header: an address that acknowledged, '
-        + 'and a name only when the chip identified itself. "declared" means a person typed it in, '
-        + 'which is the only way to know about anything on SPI, UART, a GPIO or an analog pin. '
-        + '`confirmed` says a person or the silicon vouched for the name; an unconfirmed detected '
-        + 'part is a guess from a table of common addresses, listed under `candidates`. `present` '
-        + 'is false for a detected part that stopped answering, null for a declared one. Also the '
-        + 'last scan and how many questions await a person. Read this before writing firmware '
-        + 'that talks to anything.',
+        'The wiring list: the parts somebody has told this page are attached beyond the board '
+        + 'itself, each with its bus, its address where it has one, and the pins it is on. '
+        + 'READ THIS BEFORE WRITING FIRMWARE THAT TALKS TO ANYTHING, and program against the '
+        + 'pins it gives rather than assuming a default. '
+        + 'Every entry was typed in by a person: this board cannot discover what is wired to it, '
+        + 'so the list is testimony, not measurement. It can be incomplete or out of date, and a '
+        + 'part that is not listed may still be there. If what you need is missing, say so and '
+        + 'ask for it to be added with "+ add" on the Attached list; you cannot add it yourself.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: true },
       execute: async () => ({ ok: true, ...wiringView() }),
-    },
-
-    {
-      name: 'scan_bus',
-      title: 'Probe the I2C header for anything that acknowledges',
-      description:
-        'Ask the board to scan its expansion I2C header (default D4/D5, GPIO5/GPIO6 on the XIAO '
-        + 'ESP32S3; other pins may be given) and fold the answer into the wiring list. Takes a few '
-        + 'hundred milliseconds and changes nothing on the board. Anything new is put to the person '
-        + 'as a question on the page; adding or confirming a part is theirs, never a tool. A bus '
-        + 'held low is reported as bus_stuck rather than as empty. Fails with "no board is linked" '
-        + 'until a board is linked.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          sda: { type: 'integer', minimum: 0, maximum: 48 },
-          scl: { type: 'integer', minimum: 0, maximum: 48 },
-        },
-        additionalProperties: false,
-      },
-      annotations: { readOnlyHint: true },
-      execute: async input => {
-        if (!linked()) return notLinked(fx);
-        const scan = await fx.scan?.({ sda: input?.sda, scl: input?.scl });
-        if (!scan) return { ok: false, error: 'the page has no way to ask the board' };
-        if (scan.ok === false) {
-          return { ok: false, error: scan.error || scan.err || 'the scan failed', line: scan.line || null, scan };
-        }
-        return { ok: true, ...wiringView() };
-      },
     },
 
     {
@@ -1219,23 +1207,21 @@ function learnedLimits() {
 
 /* ---- small helpers ----------------------------------------------------- */
 
-/** The wiring list as the tools hand it over: parts, the last scan, the open questions. */
+/**
+ * The wiring list as the tools hand it over.
+ *
+ * Every entry was typed in by a person. Nothing on this board can discover
+ * what is wired to it, so this list is testimony rather than measurement —
+ * and the reply says so, because a model that mistakes it for a probe result
+ * will trust a pin number nobody checked.
+ */
 function wiringView() {
-  const w = state.wiring;
-  const s = w.scan;
   return {
-    parts: w.parts.map(p => ({
-      name: p.name, how: p.how, bus: p.bus, addr: p.addr ?? null, pins: p.pins || [],
-      id: p.id || null, confirmed: !!p.confirmed, confirmedBy: p.confirmedBy || null,
-      candidates: p.confirmed ? [] : (p.candidates || []),
-      present: p.present ?? null, note: p.note || null,
+    declaredByPerson: true,
+    parts: state.wiring.parts.map(p => ({
+      name: p.name, bus: p.bus, addr: p.addr ?? null,
+      pins: p.pins || [], note: p.note || null,
     })),
-    scan: s ? {
-      at: s.at, ok: s.ok !== false, bus: s.bus || null, sda: s.sda ?? null, scl: s.scl ?? null,
-      ms: s.ms ?? null, error: s.ok === false ? (s.err || null) : null, line: s.line || null,
-      found: (s.found || []).map(f => ({ addr: f.addr, id: f.id || null })),
-    } : null,
-    asks: w.asks.length,
   };
 }
 
@@ -1374,6 +1360,10 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
 
   const register = (tools, signal) => {
     for (const t of tools) {
+      /* document.modelContext.registerTool({ name, description, inputSchema,
+         execute }, { signal }) — `mc` is document.modelContext in a browser;
+         see the note at the top of this file. The AbortSignal is how a tool
+         is taken away again when the board goes. */
       mc.registerTool(wrap(t), { signal });
       registered.add(t.name);
       signal.addEventListener('abort', () => registered.delete(t.name), { once: true });

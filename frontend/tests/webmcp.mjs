@@ -113,13 +113,6 @@ const fx = {
   },
   manifest: async () => ({ version: '0.12.0', project: 'openhardware_harness', elf_sha8: 'abc', total_bytes: 880384, parts: [] }),
   source: () => 'sim',
-  /* The page's scan: ask the board, wait for the feed to fold the answer in. */
-  scan: async opts => {
-    const before = st.state.wiring.scan;
-    await link.send({ t: 'scan', ...(opts || {}) });
-    const answered = await st.waitForState(s => s.wiring.scan !== before, { timeoutMs: 2000 });
-    return answered ? st.state.wiring.scan : { ok: false, error: 'no answer' };
-  },
   /* A stand-in for the session's guide: one phase, one next step. */
   bringUp: () => ({ phase: 'idle', next: 'Press "Connect a board" and choose the port.',
                     waitingOn: { who: 'person', what: 'Press "Connect a board" and choose the port.', options: [] },
@@ -134,7 +127,7 @@ const call = async (name, input = {}, signal) => {
   return tool.execute(input, { signal });
 };
 
-const READ = ['get_wiring', 'scan_bus', 'capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
+const READ = ['get_wiring', 'capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
 const PAGE = ['build_firmware', 'record_attempt'];
 const WRITE = ['flash_image', 'record_limit', 'restore_baseline', 'run_experiment', 'set_camera', 'set_camera_config', 'watch_for'];
 
@@ -489,17 +482,37 @@ const WRITE = ['flash_image', 'record_limit', 'restore_baseline', 'run_experimen
 /* ------------------------------------------------------------------------ */
 
 {
-  const scan = await call('scan_bus', {});
-  ok('a scan answers with what acknowledged on the header',
-     scan.ok === true && scan.scan?.found?.length === 2, JSON.stringify(scan.scan));
+  st.resetAll();
+  st.applyDevice({ link: 'linked' });
+  st.addPart({ name: 'SSD1306 OLED', bus: 'i2c', addr: 0x3c, pins: ['D4', 'D5'], note: '128x32' });
+  st.addPart({ name: 'WS2812 strip', bus: 'gpio', pins: ['D2'] });
+
   const w = await call('get_wiring');
-  ok('the wiring list carries each part with how it is known',
-     w.parts.some(p => p.addr === 0x3c && p.how === 'detected' && p.confirmed === false && p.candidates.length > 0)
-       && w.parts.some(p => p.name === 'BME280' && p.confirmed === true && p.confirmedBy === 'chip'),
+  ok('the wiring list carries what a person declared, with bus, address and pins',
+     w.parts.length === 2
+       && w.parts.some(p => p.name === 'SSD1306 OLED' && p.bus === 'i2c' && p.addr === 0x3c
+                            && p.pins.join() === 'D4,D5' && p.note === '128x32')
+       && w.parts.some(p => p.name === 'WS2812 strip' && p.bus === 'gpio'),
      JSON.stringify(w.parts));
-  ok('and says a person still has a question to answer', w.asks === 1);
+
+  /* The one thing a model must not conclude from this list is that anything
+     measured it. */
+  ok('and the reply says on its face that a person declared it',
+     w.declaredByPerson === true);
+  ok('the description tells the model it is testimony and can be incomplete',
+     /testimony/i.test(mc.get('get_wiring').description)
+       && /incomplete/i.test(mc.get('get_wiring').description));
+  ok('and tells it to read this before writing firmware that touches a pin',
+     /before writing firmware/i.test(mc.get('get_wiring').description));
+
   ok('the board report carries the same list', (await call('get_board')).wiring.parts.length === 2);
-  ok('adding or confirming a part is not a tool', !mc.names().some(n => /confirm|add_part|declare|ignore/i.test(n)));
+
+  /* Declaring hardware is a person's claim about their own bench. A tool that
+     could add to this list would let a model invent a part and then program
+     against it. */
+  ok('nothing about this list is writable by a tool',
+     !mc.names().some(n => /scan|confirm|add_part|declare|ignore|wiring_(add|set)/i.test(n)),
+     mc.names().join(','));
 }
 
 /* ------------------------------------------------------------------------ */

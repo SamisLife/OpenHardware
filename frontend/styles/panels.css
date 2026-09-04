@@ -519,38 +519,66 @@
 
 .gate[data-state="approved"] .gate__mark { color: var(--c-ink-2); }
 
-.fw { width: 100%; border-collapse: collapse; }
+/* ---- one build, one row ------------------------------------------------
+   The identity leads and the controls end the line. `flex-wrap` is what makes
+   this safe at any width: when the panel cannot hold the row, the controls
+   drop to a second line rather than being clipped or squeezed away. Nothing
+   here can disappear because the panel narrowed, which is exactly what the
+   fixed-layout table it replaced did.
+   ---------------------------------------------------------------------- */
+.fwlist { padding-bottom: 6px; }
 
-.fw th {
-  position: sticky; top: 0; z-index: 1;
-  text-align: left;
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: var(--ls-label);
-  color: var(--c-ink-3);
-  background: var(--c-panel);
-  padding: 7px var(--pad-tight);
-  border-bottom: 1px solid var(--c-rule);
+.fwrow {
+  padding: 9px var(--pad) 10px;
+  border-bottom: 1px solid var(--c-rule-soft);
 }
 
-.fw th:first-child { padding-left: var(--pad); }
+.fwrow__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
 
-.fw td {
-  font-size: var(--fs-micro);
-  color: var(--c-ink-2);
-  padding: 6px var(--pad-tight);
-  border-bottom: 1px solid var(--c-rule-soft);
+.fwrow__ver {
+  font-family: var(--f-mono);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--c-ink);
+}
+
+/* Pushed to the end of the line, and pulled back to the start of the next one
+   if the row wraps — so the buttons are always together and always reachable. */
+.fwrow__do {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   white-space: nowrap;
 }
 
-.fw td:first-child { padding-left: var(--pad); }
+.fwrow__facts {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+  padding-top: 5px;
+  letter-spacing: 0.02em;
+}
 
-.fw tr[data-outcome="active"] .fw__ver { color: var(--c-amber); }
+.fwrow__note {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+  padding-top: 2px;
+  overflow-wrap: anywhere;
+}
 
-.fw tr[data-outcome="rolled_back"] .fw__ver { color: var(--c-ink-3); text-decoration: line-through; }
+.fwrow[data-outcome="active"] .fwrow__ver { color: var(--c-amber); }
+.fwrow[data-outcome="rolled_back"] .fwrow__ver {
+  color: var(--c-ink-3);
+  text-decoration: line-through;
+}
 
-.fw__do { text-align: right; white-space: nowrap; }
 /* A flash in flight, and how the last one ended. Amber while it is happening,
    because it is the one thing on the panel that is mid-change; the verdict
    after it is grey for a success and red for a failure, on the principle that
@@ -572,7 +600,6 @@
   font-weight: 500;
   letter-spacing: 0.08em;
   padding: 2px 6px;
-  margin-right: 6px;
   border: 1px solid var(--c-etch);
   border-radius: var(--radius);
   color: var(--c-ink-2);
@@ -648,7 +675,8 @@
 
 /* ---- one build's source, read before it is written --------------------- */
 
-.fw__reviewrow td { padding: 0 var(--pad) 10px; border-bottom: 1px solid var(--c-rule-soft); }
+/* The source listing sits inside the row it belongs to. */
+.fwrow .src { margin-top: 8px; }
 
 .src {
   border: 1px solid var(--c-etch);
@@ -657,7 +685,25 @@
   padding: 8px 10px 10px;
   margin-top: 6px;
 }
-.src__head { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+/* Pinned to the top of the panel while the listing is being read.
+ *
+ * The source is now as tall as the file and the panel does the scrolling, so
+ * without this the build id and the Close button leave the screen on the
+ * first turn of the wheel and a reader has to scroll a whole file back to
+ * shut it. It sits above the table header on purpose: while a listing is
+ * open, which file this is and how to close it are what matter. */
+.src__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  background: var(--c-panel);
+  border-bottom: 1px solid var(--c-rule-soft);
+  margin-bottom: 6px;
+}
 .src__title {
   font-family: var(--f-cond);
   font-size: var(--fs-micro);
@@ -676,12 +722,21 @@
   letter-spacing: 0.04em;
   padding: 4px 0 3px;
 }
-/* Long lines scroll inside the block; the panel underneath never widens. */
+/* One scroll, not two.
+ *
+ * This block used to have its own height and its own vertical scrollbar, which
+ * meant opening a listing put a small scrolling window inside an already
+ * scrolling panel: the wheel did different things a few pixels apart, and
+ * reaching the end of the file did not reach the row below it. The block is
+ * now simply as tall as the source, and the panel it sits in does the
+ * scrolling — the one it was already doing.
+ *
+ * The horizontal axis keeps its own scrollbar, because a line of C is not
+ * something to wrap and the panel must not widen for it. */
 .src__code {
   margin: 0;
-  max-height: 340px;
-  overflow: auto;
-  overscroll-behavior: contain;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
   background: var(--c-recess);
   border: 1px solid var(--c-rule-soft);
   border-radius: var(--radius);
@@ -998,22 +1053,24 @@
 /* The image history has priority for the panel height and scrolls when it
    runs out. The learned-limits list below is the one that gives way — the
    reverse squeezes the table to nothing in the two-column layout. */
-.fw__scroll { overflow: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; }
-
-.fw__ver { color: var(--c-ink); font-weight: 500; }
-
-.fw__sha, .fw__size, .fw__time { color: var(--c-ink-4); }
-
-.fw__noterow td { border-bottom: 1px solid var(--c-rule-soft); padding-top: 0; }
-
-.fw__note {
-  display: block;
-  font-family: var(--f-cond);
-  font-size: var(--fs-micro);
-  color: var(--c-ink-4);
-  white-space: normal;
-  max-width: 46ch;
+/* Scrolls down and never across.
+ *
+ * This was a table of six columns, and in a panel that is a third of the width
+ * at 1440 it did not fit. The default answer — let it scroll sideways — is the
+ * worst one: the version and the buttons end up at opposite ends of a gesture,
+ * and reading one row takes two directions of scrolling. The rows below wrap
+ * instead, so there is nothing left to scroll across and the axis is closed. */
+.fw__scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1 1 auto;
+  min-height: 0;
 }
+
+
+
+
 
 .limit {
   padding: 6px var(--pad);
@@ -1077,11 +1134,12 @@
 }
 
 /* ==========================================================================
-   THE WIRING LIST — badges, the question card, the add form
+   THE WIRING LIST — the badge and the add form
    --------------------------------------------------------------------------
-   Detected is cyan and declared is amber, the same two colours the source
-   badge uses for measured versus simulated, because it is the same
-   distinction: what the hardware said against what a person said.
+   Amber for declared, the colour the source badge uses for simulated, because
+   it is the same kind of claim: something a person asserted rather than
+   something the hardware reported. The camera is the one row on this list the
+   board found by itself, and it carries the detected badge.
    ========================================================================== */
 
 .periph__how {
@@ -1102,11 +1160,6 @@
   background: var(--c-amber-wash);
 }
 
-/* A part the last scan did not find is kept, and dimmed to say so. */
-.periph[data-tone="absent"] .periph__name,
-.periph[data-tone="absent"] .periph__detail,
-.periph[data-tone="absent"] .periph__icon { color: var(--c-ink-4); }
-
 .panel__divide--controls {
   display: flex;
   align-items: baseline;
@@ -1123,23 +1176,6 @@
 }
 .periph__ctl:disabled { color: var(--c-ink-4); cursor: default; }
 
-/* The question card. Amber because it wants a person, once. */
-.question-slot { margin: 10px var(--pad) 4px; }
-.question-slot[hidden] { display: none; }
-
-.question {
-  padding: 10px 12px;
-  border: 1px solid var(--c-amber-dim);
-  background: var(--c-amber-wash);
-  border-radius: var(--radius);
-}
-.question__text { font-size: var(--fs-small); line-height: 1.5; color: var(--c-ink); }
-.question__text strong { color: var(--c-amber); }
-.question__row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.question__row[hidden] { display: none; }
-.question__count { margin-left: auto; }
-
-.question__pick, .question__other,
 .addform input, .addform select {
   font: inherit;
   font-size: var(--fs-small);
@@ -1150,7 +1186,6 @@
   padding: 3px 7px;
   min-width: 0;
 }
-.question__other { flex: 1 1 12ch; }
 
 .addform {
   margin: 10px var(--pad) 4px;

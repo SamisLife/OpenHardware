@@ -87,3 +87,53 @@
 @media (prefers-reduced-motion: reduce) {
   :root { --dur-fast: 0ms; --dur: 0ms; }
 }
+
+/* ---------------------------------------------------------------------------
+   Scrollbars.
+
+   The default ones are a light-grey artefact of the host operating system and
+   the only part of this page that was not designed. They sit inside panels
+   that are otherwise machined out of two greys, and they are the first thing
+   the eye lands on. Given a rule, they become part of the instrument: a track
+   the colour of the recess a list already sits in, and a thumb that reads as a
+   bar rather than a control to be decorated.
+
+   Both spellings, because they do different things. `scrollbar-width: thin`
+   and `scrollbar-color` are the standard properties and are what a browser
+   without the WebKit pseudo-elements will honour; the pseudo-elements are what
+   Chrome actually uses, and they allow the track to disappear entirely.
+   ------------------------------------------------------------------------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-etch) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--c-etch);
+  border-radius: 6px;
+  /* Drawn inside a transparent border so the bar is slimmer than the track it
+     travels in, and does not touch the content beside it. */
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--c-ink-4);
+  background-clip: padding-box;
+}
+
+/* Where two scrollable areas meet, the corner is the one piece of default
+   chrome with no thumb in it to justify itself. */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}

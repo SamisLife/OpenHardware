@@ -53,7 +53,7 @@
    ========================================================================== */
 
 /** How many telemetry samples to retain. 480 @ 4 Hz = 120 s of chart. */
-import { reconcile, keyFor } from './wiring.js';
+import { keyFor } from './wiring.js';
 
 export const BUFFER_LEN = 480;
 
@@ -181,17 +181,15 @@ export const state = {
      come from the board's own scan of its I2C header; declared parts come
      from a person, because the board cannot see a strip of LEDs on a GPIO.
      See wiring.js for the shape of a part and for how a scan is folded in. */
+  /* ---- devices/{id}/wiring ----------------------------------------------
+     What is attached beyond the board, as far as anybody has said. Nothing
+     here is discovered: this board has no way to look, so every entry was
+     declared by a person. It is offered to an agent as exactly that — what
+     somebody says is wired, never what anything measured — which is what
+     makes it useful before writing code that assumes a pin. */
   wiring: {
-    /** the last scan the board answered, or null */
-    scan: null,
-    /** { key, how, bus, addr, pins, id, name, candidates, confirmed, confirmedBy, present, note, at } */
+    /** { key, how: 'declared', bus, addr, pins, name, note, at } */
     parts: [],
-    /** questions for a person: { kind: 'new' | 'missing', key } */
-    asks: [],
-    /** keys a person chose not to list; dropped from every scan */
-    ignored: [],
-    /** whether a scan is in flight */
-    scanning: false,
   },
 
   /* ---- devices/{id}/memory/procedural ------------------------------------
@@ -550,74 +548,18 @@ function mergeSteps(prev, incoming) {
 /* ---- devices/{id}/wiring ---------------------------------------------- */
 
 function emptyWiring() {
-  return { scan: null, parts: [], asks: [], ignored: [], scanning: false };
+  return { parts: [] };
 }
 
-/**
- * A scan the board answered, folded into the list.
- *
- * Questions already open stay open while they still apply — a new part not
- * yet confirmed, a missing part not yet kept — and are dropped the moment the
- * list no longer has the thing they ask about. Nothing else in the model is
- * touched: a scan says what answered on one bus, and that is all it says.
- */
-export function applyScan(result) {
-  if (!result) return;
-  const scan = { ...result, at: result.at || Date.now() };
-  const { parts, asks } = reconcile(scan, state.wiring.parts, state.wiring.ignored);
-  const still = state.wiring.asks.filter(a => {
-    const p = parts.find(x => x.key === a.key);
-    if (!p) return false;
-    return a.kind === 'new' ? (!p.confirmed && p.present !== false) : p.present === false;
-  });
-  for (const a of asks) if (!still.some(s => s.key === a.key)) still.push(a);
-  state.wiring = { ...state.wiring, scan, parts, asks: still, scanning: false };
-  touch('wiring');
-}
-
-/** Page-side flags of the wiring slice: scanning, and nothing else yet. */
-export function applyWiring(patch) {
-  Object.assign(state.wiring, patch);
-  touch('wiring');
-}
-
-function dropAsk(key) {
-  state.wiring.asks = state.wiring.asks.filter(a => a.key !== key);
-}
-
-/** A person named a detected part. Their word outranks the table and the silicon. */
-export function confirmPart(key, name) {
-  const clean = String(name || '').trim();
-  const p = state.wiring.parts.find(x => x.key === key);
-  if (!p || !clean) return;
-  Object.assign(p, { name: clean, confirmed: true, confirmedBy: 'person' });
-  dropAsk(key);
-  touch('wiring');
-}
-
-/** A person chose not to list an address. Remembered, so it is not asked again. */
-export function ignorePart(key) {
-  state.wiring.parts = state.wiring.parts.filter(x => x.key !== key);
-  if (!state.wiring.ignored.includes(key)) state.wiring.ignored.push(key);
-  dropAsk(key);
-  touch('wiring');
-}
-
-/** A person kept a part the last scan did not find. It stays, marked absent. */
-export function keepPart(key) {
-  dropAsk(key);
-  touch('wiring');
-}
-
+/** A person said a part is no longer there. */
 export function removePart(key) {
   state.wiring.parts = state.wiring.parts.filter(x => x.key !== key);
-  dropAsk(key);
   touch('wiring');
 }
 
 /**
- * A part a person declared. `present` is null rather than true: the board
- * cannot see it, so nothing here claims it answered.
+ * A part a person declared, which is the only way anything reaches this list.
+ * Nothing here claims the part answered, because nothing asked it to.
  */
 export function addPart({ name, bus = 'other', addr = null, pins = [], note = null } = {}) {
   const clean = String(name || '').trim();
@@ -625,28 +567,24 @@ export function addPart({ name, bus = 'other', addr = null, pins = [], note = nu
   const a = Number.isInteger(addr) ? addr : null;
   const key = keyFor(bus, a, clean);
   const part = {
-    key, how: 'declared', bus, addr: a, pins: [...pins], id: null, name: clean,
-    candidates: [], confirmed: true, confirmedBy: 'person', present: null,
-    note: note || null, at: Date.now(), seenAt: 0,
+    key, how: 'declared', bus, addr: a, pins: [...pins], name: clean,
+    note: note || null, at: Date.now(),
   };
   const i = state.wiring.parts.findIndex(x => x.key === key);
   if (i >= 0) state.wiring.parts[i] = { ...state.wiring.parts[i], ...part };
   else state.wiring.parts.push(part);
-  dropAsk(key);
   touch('wiring');
 }
 
 /**
- * What a previous visit knew about this board: the parts a person declared or
- * confirmed, and the addresses they ignored. Merged under what this visit has
- * already found, never over it.
+ * What a previous visit declared about this board, merged under anything this
+ * visit has already said rather than over it.
  */
-export function restoreWiring({ parts = [], ignored = [] } = {}) {
+export function restoreWiring({ parts = [] } = {}) {
   const known = new Set(state.wiring.parts.map(p => p.key));
   for (const p of parts) {
-    if (p && p.key && !known.has(p.key)) state.wiring.parts.push({ ...p, present: null });
+    if (p && p.key && !known.has(p.key)) state.wiring.parts.push({ ...p });
   }
-  for (const k of ignored) if (!state.wiring.ignored.includes(k)) state.wiring.ignored.push(k);
   touch('wiring');
 }
 

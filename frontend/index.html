@@ -155,17 +155,12 @@
 
       <div class="panel__divide panel__divide--controls">
         <span>Attached</span>
-        <em>discovered, never assumed</em>
-        <button type="button" class="btn periph__ctl" data-periph="scan"
-                title="probe the I2C header for anything that acknowledges">+ scan</button>
+        <em>declared, never guessed</em>
         <button type="button" class="btn periph__ctl" data-periph="add"
                 title="declare a part the board cannot see">+ add</button>
       </div>
 
       <div class="periph-scroll">
-        <!-- A question for a person, one at a time: found an address, what is it? -->
-        <p class="periph__scan meta" data-periph="status" hidden></p>
-        <div class="question-slot" data-periph="ask" hidden></div>
         <!-- Declaring what the board cannot see. Nothing here is a tool. -->
         <form class="addform" data-periph="form" hidden>
           <label data-wide>Name <input type="text" data-f="name" required autocomplete="off" spellcheck="false" placeholder="WS2812 strip"></label>
@@ -254,19 +249,15 @@
       </header>
 
       <div class="fw__scroll">
-        <table class="fw">
-          <thead>
-            <tr>
-              <th scope="col">Version</th>
-              <th scope="col">SHA</th>
-              <th scope="col">Size</th>
-              <th scope="col">Built</th>
-              <th scope="col">Outcome</th>
-              <th scope="col"><span class="sr-only">Flash</span></th>
-            </tr>
-          </thead>
-          <tbody data-fw="body"></tbody>
-        </table>
+        <!-- A list rather than a table.
+             Six columns never fit a panel that is a third of the width on a
+             wide screen, and the fixed-layout table that tried had a trap in
+             it: hiding a cell moves every cell after it into an earlier
+             column, so collapsing the hash and size columns silently squeezed
+             the outcome tag and the buttons to nothing. A row that wraps
+             cannot do that — when there is no space the actions move to the
+             next line, and they are always on screen. -->
+        <div class="fwlist" data-fw="body"></div>
         <p class="empty" data-fw="empty">No images yet.</p>
       </div>
 

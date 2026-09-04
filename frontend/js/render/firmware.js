@@ -115,18 +115,28 @@ export function renderFirmware(state) {
         + (menuFor === f.buildId ? rowMenu(f, confirmDelete === f.buildId) : '')
       : '';
 
+    const sha = (f.sha || '').slice(0, 7) || NIL;
+    const size = Number.isFinite(f.bytes) ? `${(f.bytes / 1024).toFixed(0)} KB` : NIL;
+    const built = clock(f.builtAt);
+    const facts = [sha, size, built].filter(v => v && v !== NIL).join(' · ');
+
+    /* One row that wraps, rather than six columns that do not fit. The
+       identity leads, the outcome and the buttons sit at the end, and when
+       the panel is too narrow to hold them on one line they move to the next
+       one — never off the row. The facts underneath are the same three the
+       table used to spend three columns on. */
     return `
-      <tr data-outcome="${f.outcome}"${f.buildId ? ` data-build="${esc(f.buildId)}"` : ''}>
-        <td class="fw__ver">${esc(f.version)}</td>
-        <td class="fw__sha">${esc((f.sha || '').slice(0, 7) || NIL)}</td>
-        <td class="fw__size">${Number.isFinite(f.bytes) ? (f.bytes / 1024).toFixed(0) + ' KB' : NIL}</td>
-        <td class="fw__time">${clock(f.builtAt)}</td>
-        <td class="fw__outcome"><span class="tag" data-tone="${o.tone}">${o.label}</span></td>
-        <td class="fw__do">${action}<span class="fw__menuwrap">${menu}</span></td>
-      </tr>
-      ${f.note ? `<tr class="fw__noterow"><td colspan="6"><span class="fw__note">${esc(f.note)}</span></td></tr>` : ''}
-      ${review && review.buildId === f.buildId && review.from === 'row'
-        ? `<tr class="fw__reviewrow"><td colspan="6">${sourceView(review)}</td></tr>` : ''}
+      <div class="fwrow" data-outcome="${f.outcome}"${f.buildId ? ` data-build="${esc(f.buildId)}"` : ''}>
+        <div class="fwrow__main">
+          <span class="fwrow__ver">${esc(f.version)}</span>
+          <span class="tag fwrow__tag" data-tone="${o.tone}">${o.label}</span>
+          <span class="fwrow__do">${action}<span class="fw__menuwrap">${menu}</span></span>
+        </div>
+        ${facts ? `<div class="fwrow__facts">${esc(facts)}</div>` : ''}
+        ${f.note ? `<div class="fwrow__note">${esc(f.note)}</div>` : ''}
+        ${review && review.buildId === f.buildId && review.from === 'row'
+          ? sourceView(review) : ''}
+      </div>
     `;
   }).join('');
 
