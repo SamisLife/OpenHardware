@@ -129,13 +129,14 @@ static const char *aborted_slot(void)
 /**
  * Keep this image.
  *
- * Called the moment the wire and the heartbeat are up, before the camera and
- * before the application layer, because what rollback guards against is an
- * image that cannot report — and by this line it demonstrably can. An
- * application that crashes is contained by its own counter in hw_app.c and
- * stays visible in every hello; it is not a reason to lose the harness that
- * is reporting it. A factory image has nothing to confirm.
+ * Called on the first line of app_main, before storage, the wire, the camera,
+ * and the application layer. Reaching app_main proves the harness image can
+ * boot; an application crash is contained by its own counter in hw_app.c and
+ * stays visible in every hello. A factory image has nothing to confirm.
  */
+static char s_image_note[48];
+static bool s_image_unconfirmed = false;
+
 static void confirm_image(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -143,14 +144,25 @@ static void confirm_image(void)
     if (!running || esp_ota_get_state_partition(running, &st) != ESP_OK) return;
     if (st != ESP_OTA_IMG_PENDING_VERIFY && st != ESP_OTA_IMG_NEW) return;
 
+    /* An early host reopen resets the board. Every millisecond between boot
+       and this line is a window in which that reset rolls the image back, so
+       the page leaves the candidate alone first. The report waits for wire. */
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "%s confirmed; the bootloader will keep it", running->label);
-        hw_proto_status("image_valid", running->label);
+        snprintf(s_image_note, sizeof s_image_note, "%s", running->label);
     } else {
         ESP_LOGW(TAG, "could not confirm %s: %s", running->label, esp_err_to_name(err));
-        hw_proto_status("image_unconfirmed", esp_err_to_name(err));
+        snprintf(s_image_note, sizeof s_image_note, "%s", esp_err_to_name(err));
+        s_image_unconfirmed = true;
     }
+}
+
+/** What confirm_image() did, said once the wire can carry it. */
+static void report_image(void)
+{
+    if (!s_image_note[0]) return;
+    hw_proto_status(s_image_unconfirmed ? "image_unconfirmed" : "image_valid", s_image_note);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -306,7 +318,7 @@ static void send_hello(void)
         "\"mac\":\"%s\",\"boot_id\":\"%s\",\"reset\":\"%s\","
         "\"provisioned\":%s,\"ssid\":\"%s\",\"net\":\"%s\","
         "\"psram\":%lu,\"flash\":%lu,\"heap\":%lu,\"heap_total\":%lu,"
-        "\"temp_crit_c\":85,\"rx\":%lu,"
+        "\"temp_crit_c\":85,\"rx\":%lu,\"rx_rescued\":%lu,"
         "\"ota\":\"%s\","
         "\"app\":{\"name\":\"%s\",\"ver\":\"%s\",\"state\":\"%s\"%s}%s",
         HW_PROTO_VERSION, s_fw, s_sha,
@@ -320,6 +332,7 @@ static void send_hello(void)
         (unsigned long)hw_sensors_heap_free(),
         (unsigned long)hw_sensors_heap_total(),
         (unsigned long)hw_proto_rx_bytes(),
+        (unsigned long)hw_proto_rx_rescued(),
         ota_state_str(),
         hw_app_name(), hw_app_version(), hw_app_state_str(), app_crashes,
         opt);
@@ -385,6 +398,22 @@ static void on_frame(const char *type, const char *json)
 
         hw_camera_set_streaming(want);
         hw_proto_sendf("cam_ack", "\"on\":%s", want ? "true" : "false");
+        return;
+    }
+
+    /* A scan occupies the header for a few hundred milliseconds and answers
+       once, from its own task, so the wire keeps its cadence meanwhile. Pins
+       default to the header's; a request naming others is checked against
+       what the camera and the USB peripheral own before anything is touched. */
+    if (strcmp(type, "scan") == 0) {
+        int sda = HW_I2C_DEFAULT_SDA, scl = HW_I2C_DEFAULT_SCL;
+        hw_json_int(json, "sda", &sda);
+        hw_json_int(json, "scl", &scl);
+        const esp_err_t err = hw_i2c_request_scan(sda, scl);
+        if (err != ESP_OK) {
+            hw_proto_sendf("scan_ack", "\"ok\":false,\"err\":\"%s\",\"sda\":%d,\"scl\":%d",
+                           err == ESP_ERR_INVALID_STATE ? "busy" : esp_err_to_name(err), sda, scl);
+        }
         return;
     }
 
@@ -656,6 +685,10 @@ static void camera_task(void *arg)
 
 void app_main(void)
 {
+    /* 0. Keep this image, if it is on trial. Nothing else is needed for it,
+       and everything else takes time the trial does not have. */
+    confirm_image();
+
     /* 1. Storage. */
     esp_err_t err = hw_prov_init();
     if (err != ESP_OK) ESP_LOGE(TAG, "nvs unavailable: %s", esp_err_to_name(err));
@@ -692,7 +725,7 @@ void app_main(void)
     xTaskCreate(beat_task, "hw_beat", 4096, NULL, 5, NULL);
 
     hw_proto_status("ready", "reporting over USB");
-    confirm_image();
+    report_image();
 
     /* Below the line: everything that can fail. It runs at a lower priority
        than the heartbeat, on its own stack, and it starts by waiting — so the

@@ -114,6 +114,16 @@
 }
 .btn--primary:hover { background: #ffc233; }
 
+.btn--small {
+  font-size: var(--fs-micro);
+  padding: 2px 9px;
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.btn:disabled:hover { background: var(--c-panel-hi); color: var(--c-ink-2); }
+
 /* ========================================================================= */
 /* CAMERA                                                                    */
 /* ========================================================================= */
@@ -337,22 +347,43 @@
 .periphs { padding: 2px 0; }
 
 .periph {
-  display: grid;
-  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
-  gap: 3px 10px;
-  padding: 7px var(--pad);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px var(--pad);
   border-bottom: 1px solid var(--c-rule-soft);
 }
 
 .periph__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-family: var(--f-mono);
   font-size: var(--fs-small);
   color: var(--c-ink);
+  white-space: nowrap;
+}
+
+/* The glyph takes the row's ink, so a faulted camera's icon is red with its
+   name and a guessed part's icon is as grey as the guess. */
+.periph__icon { flex: none; color: var(--c-ink-3); }
+.periph[data-tone="fault"] .periph__icon { color: var(--c-red); }
+
+/* The one control in the list. Small, ghosted, and the label is the verb
+   for the NEXT press, never the current state. */
+.periph__act {
+  flex: none;
+  padding: 2px 8px;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 /* An address is an observation; a part number beside it is an inference, and
    the two do not get to look alike. */
 .periph__detail {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: var(--fs-micro);
   color: var(--c-ink-3);
   text-align: right;
@@ -361,32 +392,6 @@
 .periph[data-tone="fault"] .periph__name,
 .periph[data-tone="fault"] .periph__detail { color: var(--c-red); }
 
-/* ---- the camera offer -------------------------------------------------- */
-
-.offer {
-  margin: 10px var(--pad);
-  padding: 11px 12px;
-  border: 1px solid var(--c-amber-dim);
-  background: var(--c-amber-wash);
-  border-radius: var(--radius);
-}
-.offer[hidden] { display: none; }
-
-.offer__text {
-  font-size: var(--fs-small);
-  line-height: 1.5;
-  color: var(--c-ink);
-}
-.offer__text strong { color: var(--c-amber); }
-
-.offer__actions { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
-
-.offer__why {
-  margin-top: 8px;
-  font-size: var(--fs-micro);
-  color: var(--c-ink-4);
-  line-height: 1.5;
-}
 
 
 /* ===========================================================================
@@ -403,6 +408,16 @@
    steps that were real.
    ========================================================================= */
 .btn--ghost { background: transparent; }
+
+/* Hide sits after the frame's metadata, at the panel's edge, as small as the
+   metadata itself: it is a control, not a call to action. */
+.cam__hide {
+  margin-left: 10px;
+  padding: 2px 8px;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
 /* ========================================================================= */
 /* WORK ORDER + BUILD LOG                                                    */
@@ -534,6 +549,14 @@
 .fw tr[data-outcome="active"] .fw__ver { color: var(--c-amber); }
 
 .fw tr[data-outcome="rolled_back"] .fw__ver { color: var(--c-ink-3); text-decoration: line-through; }
+
+.fw__do { text-align: right; }
+.fw__flashing {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  color: var(--c-amber);
+  letter-spacing: 0.04em;
+}
 
 /* ---- learned limits ---------------------------------------------------- */
 
@@ -913,3 +936,101 @@
   padding: 0 4px;
   cursor: help;
 }
+
+/* ==========================================================================
+   THE WIRING LIST — badges, the question card, the add form
+   --------------------------------------------------------------------------
+   Detected is cyan and declared is amber, the same two colours the source
+   badge uses for measured versus simulated, because it is the same
+   distinction: what the hardware said against what a person said.
+   ========================================================================== */
+
+.periph__how {
+  flex: none;
+  font-size: 9px;
+  padding: 1px 5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.periph__how[data-how="detected"] {
+  color: var(--c-cyan);
+  border-color: var(--c-cyan-dim);
+  background: rgba(88, 200, 216, 0.08);
+}
+.periph__how[data-how="declared"] {
+  color: var(--c-amber);
+  border-color: var(--c-amber-dim);
+  background: var(--c-amber-wash);
+}
+
+/* A part the last scan did not find is kept, and dimmed to say so. */
+.periph[data-tone="absent"] .periph__name,
+.periph[data-tone="absent"] .periph__detail,
+.periph[data-tone="absent"] .periph__icon { color: var(--c-ink-4); }
+
+.panel__divide--controls {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.panel__divide--controls em { flex: 1 1 auto; }
+
+.periph__ctl {
+  flex: none;
+  padding: 1px 7px;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.periph__ctl:disabled { color: var(--c-ink-4); cursor: default; }
+
+/* The question card. Amber because it wants a person, once. */
+.question-slot { margin: 10px var(--pad) 4px; }
+.question-slot[hidden] { display: none; }
+
+.question {
+  padding: 10px 12px;
+  border: 1px solid var(--c-amber-dim);
+  background: var(--c-amber-wash);
+  border-radius: var(--radius);
+}
+.question__text { font-size: var(--fs-small); line-height: 1.5; color: var(--c-ink); }
+.question__text strong { color: var(--c-amber); }
+.question__row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.question__row[hidden] { display: none; }
+.question__count { margin-left: auto; }
+
+.question__pick, .question__other,
+.addform input, .addform select {
+  font: inherit;
+  font-size: var(--fs-small);
+  color: var(--c-ink);
+  background: var(--c-recess);
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  padding: 3px 7px;
+  min-width: 0;
+}
+.question__other { flex: 1 1 12ch; }
+
+.addform {
+  margin: 10px var(--pad) 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.addform[hidden] { display: none; }
+.addform label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--c-ink-3);
+}
+.addform label[data-wide] { grid-column: 1 / -1; }
+.addform__row { grid-column: 1 / -1; display: flex; gap: 8px; }

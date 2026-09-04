@@ -130,6 +130,8 @@
         <span class="meta" data-cam="res">––</span>
         <span class="meta" data-cam="quality">––</span>
         <span class="meta" data-cam="seq">––</span>
+        <button type="button" class="btn btn--ghost cam__hide" data-cam="hide"
+                title="hide the picture; the stream keeps running, and Show on the Attached list brings it back">Hide</button>
       </header>
 
       <div class="cam" data-cam="well" data-link="offline">
@@ -158,13 +160,40 @@
 
       <div class="vitals" data-vitals="grid"></div>
 
-      <div class="panel__divide">
+      <div class="panel__divide panel__divide--controls">
         <span>Attached</span>
         <em>discovered, never assumed</em>
+        <button type="button" class="btn periph__ctl" data-periph="scan"
+                title="probe the I2C header for anything that acknowledges">+ scan</button>
+        <button type="button" class="btn periph__ctl" data-periph="add"
+                title="declare a part the board cannot see">+ add</button>
       </div>
 
       <div class="periph-scroll">
-        <div class="offer" data-periph="prompt" hidden></div>
+        <!-- A question for a person, one at a time: found an address, what is it? -->
+        <p class="periph__scan meta" data-periph="status" hidden></p>
+        <div class="question-slot" data-periph="ask" hidden></div>
+        <!-- Declaring what the board cannot see. Nothing here is a tool. -->
+        <form class="addform" data-periph="form" hidden>
+          <label data-wide>Name <input type="text" data-f="name" required autocomplete="off" spellcheck="false" placeholder="WS2812 strip"></label>
+          <label>Bus
+            <select data-f="bus">
+              <option value="gpio">GPIO</option>
+              <option value="i2c">I2C</option>
+              <option value="spi">SPI</option>
+              <option value="uart">UART</option>
+              <option value="analog">analog</option>
+              <option value="other">other</option>
+            </select>
+          </label>
+          <label>Address <input type="text" data-f="addr" autocomplete="off" placeholder="0x3c, I2C only"></label>
+          <label data-wide>Pins <input type="text" data-f="pins" autocomplete="off" spellcheck="false" placeholder="D2, D3"></label>
+          <label data-wide>Note <input type="text" data-f="note" autocomplete="off" placeholder="30 LEDs, 5 V from the header"></label>
+          <div class="addform__row">
+            <button type="submit" class="btn btn--primary">Add</button>
+            <button type="button" class="btn" data-periph="cancel">Cancel</button>
+          </div>
+        </form>
         <ul class="periphs" data-periph="list"></ul>
         <p class="empty" data-periph="empty">Waiting for the board to report what is attached.</p>
       </div>
@@ -240,6 +269,7 @@
               <th scope="col">Size</th>
               <th scope="col">Built</th>
               <th scope="col">Outcome</th>
+              <th scope="col"><span class="sr-only">Flash</span></th>
             </tr>
           </thead>
           <tbody data-fw="body"></tbody>

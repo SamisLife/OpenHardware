@@ -7,6 +7,7 @@ idf_component_register(
     "hw_camera.c"
     "hw_net.c"
     "hw_app.c"
+    "hw_i2c.c"
   INCLUDE_DIRS "."
   REQUIRES
     nvs_flash esp_psram app_update esp_timer esp_system spi_flash esp_partition

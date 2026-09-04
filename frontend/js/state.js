@@ -54,6 +54,8 @@
    ========================================================================== */
 
 /** How many telemetry samples to retain. 480 @ 4 Hz = 120 s of chart. */
+import { reconcile, keyFor } from './wiring.js';
+
 export const BUFFER_LEN = 480;
 
 /**
@@ -95,6 +97,8 @@ export const state = {
     app: null,
     appState: null,
     appLoops: null,
+    /** Total inbound bytes reported by the firmware in its latest hello. */
+    rxBytes: null,
     bootId: null,
     reset: null,
     reboots: 0,
@@ -156,12 +160,8 @@ export const state = {
     known: false,
     /** { state, sensor } — state is ok | absent | faulted | untried */
     camera: null,
-    /** 7-bit addresses that acknowledged on the expansion bus */
-    i2c: [],
     /** whether the board is currently capturing */
     streaming: false,
-    /** set once the operator has answered the camera prompt either way */
-    cameraAsked: false,
     /**
      * Whether the operator asked for the stream, as distinct from whether it
      * is running.
@@ -178,6 +178,24 @@ export const state = {
     config: null,
     /** what the board said the last time it refused a cfg, or null */
     cfgError: null,
+  },
+
+  /* ---- devices/{id}/wiring --------------------------------------------
+     What is attached beyond the board, and how that is known. Detected parts
+     come from the board's own scan of its I2C header; declared parts come
+     from a person, because the board cannot see a strip of LEDs on a GPIO.
+     See wiring.js for the shape of a part and for how a scan is folded in. */
+  wiring: {
+    /** the last scan the board answered, or null */
+    scan: null,
+    /** { key, how, bus, addr, pins, id, name, candidates, confirmed, confirmedBy, present, note, at } */
+    parts: [],
+    /** questions for a person: { kind: 'new' | 'missing', key } */
+    asks: [],
+    /** keys a person chose not to list; dropped from every scan */
+    ignored: [],
+    /** whether a scan is in flight */
+    scanning: false,
   },
 
   /* ---- devices/{id}/memory/procedural ------------------------------------
@@ -223,6 +241,19 @@ export const state = {
      * each is registered at this moment, published by the toolbelt so the
      * panel can draw what an agent would find.
      */
+    /**
+     * Whether the person wants the picture on screen. The stream is a
+     * separate question: it keeps running while the panel is hidden, so the
+     * frame rate and the frame age stay measured for whoever is reading them.
+     */
+    cameraShown: true,
+    /**
+     * The flash in progress, or null. Set for the whole of one flash — from
+     * the moment it is asked for, through the operator's approval, to the boot
+     * verdict — so the Flash buttons and the tool refuse a second one while it
+     * runs. `{ buildId }`, or `{ baseline: true }` for a baseline restore.
+     */
+    flashing: null,
     agent: { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false, tools: [] },
   },
 };
@@ -281,7 +312,7 @@ function flush() {
 /** Force a full render. Used once at startup and on resize. */
 export function renderAll() {
   touch('device', 'telemetry', 'frame', 'peripherals', 'firmware',
-        'workOrder', 'attempts', 'memory', 'gate', 'ui');
+        'workOrder', 'attempts', 'memory', 'gate', 'ui', 'wiring');
 }
 
 /**
@@ -490,6 +521,109 @@ function mergeSteps(prev, incoming) {
   return out;
 }
 
+/* ---- devices/{id}/wiring ---------------------------------------------- */
+
+function emptyWiring() {
+  return { scan: null, parts: [], asks: [], ignored: [], scanning: false };
+}
+
+/**
+ * A scan the board answered, folded into the list.
+ *
+ * Questions already open stay open while they still apply — a new part not
+ * yet confirmed, a missing part not yet kept — and are dropped the moment the
+ * list no longer has the thing they ask about. Nothing else in the model is
+ * touched: a scan says what answered on one bus, and that is all it says.
+ */
+export function applyScan(result) {
+  if (!result) return;
+  const scan = { ...result, at: result.at || Date.now() };
+  const { parts, asks } = reconcile(scan, state.wiring.parts, state.wiring.ignored);
+  const still = state.wiring.asks.filter(a => {
+    const p = parts.find(x => x.key === a.key);
+    if (!p) return false;
+    return a.kind === 'new' ? (!p.confirmed && p.present !== false) : p.present === false;
+  });
+  for (const a of asks) if (!still.some(s => s.key === a.key)) still.push(a);
+  state.wiring = { ...state.wiring, scan, parts, asks: still, scanning: false };
+  touch('wiring');
+}
+
+/** Page-side flags of the wiring slice: scanning, and nothing else yet. */
+export function applyWiring(patch) {
+  Object.assign(state.wiring, patch);
+  touch('wiring');
+}
+
+function dropAsk(key) {
+  state.wiring.asks = state.wiring.asks.filter(a => a.key !== key);
+}
+
+/** A person named a detected part. Their word outranks the table and the silicon. */
+export function confirmPart(key, name) {
+  const clean = String(name || '').trim();
+  const p = state.wiring.parts.find(x => x.key === key);
+  if (!p || !clean) return;
+  Object.assign(p, { name: clean, confirmed: true, confirmedBy: 'person' });
+  dropAsk(key);
+  touch('wiring');
+}
+
+/** A person chose not to list an address. Remembered, so it is not asked again. */
+export function ignorePart(key) {
+  state.wiring.parts = state.wiring.parts.filter(x => x.key !== key);
+  if (!state.wiring.ignored.includes(key)) state.wiring.ignored.push(key);
+  dropAsk(key);
+  touch('wiring');
+}
+
+/** A person kept a part the last scan did not find. It stays, marked absent. */
+export function keepPart(key) {
+  dropAsk(key);
+  touch('wiring');
+}
+
+export function removePart(key) {
+  state.wiring.parts = state.wiring.parts.filter(x => x.key !== key);
+  dropAsk(key);
+  touch('wiring');
+}
+
+/**
+ * A part a person declared. `present` is null rather than true: the board
+ * cannot see it, so nothing here claims it answered.
+ */
+export function addPart({ name, bus = 'other', addr = null, pins = [], note = null } = {}) {
+  const clean = String(name || '').trim();
+  if (!clean) return;
+  const a = Number.isInteger(addr) ? addr : null;
+  const key = keyFor(bus, a, clean);
+  const part = {
+    key, how: 'declared', bus, addr: a, pins: [...pins], id: null, name: clean,
+    candidates: [], confirmed: true, confirmedBy: 'person', present: null,
+    note: note || null, at: Date.now(), seenAt: 0,
+  };
+  const i = state.wiring.parts.findIndex(x => x.key === key);
+  if (i >= 0) state.wiring.parts[i] = { ...state.wiring.parts[i], ...part };
+  else state.wiring.parts.push(part);
+  dropAsk(key);
+  touch('wiring');
+}
+
+/**
+ * What a previous visit knew about this board: the parts a person declared or
+ * confirmed, and the addresses they ignored. Merged under what this visit has
+ * already found, never over it.
+ */
+export function restoreWiring({ parts = [], ignored = [] } = {}) {
+  const known = new Set(state.wiring.parts.map(p => p.key));
+  for (const p of parts) {
+    if (p && p.key && !known.has(p.key)) state.wiring.parts.push({ ...p, present: null });
+  }
+  for (const k of ignored) if (!state.wiring.ignored.includes(k)) state.wiring.ignored.push(k);
+  touch('wiring');
+}
+
 /** Page-local flags. */
 export function applyUi(patch) {
   Object.assign(state.ui, patch);
@@ -543,10 +677,13 @@ export function resetAll() {
     jpegQuality: 0, bytes: 0, url: null, verdict: null,
   };
   state.peripherals = {
-    known: false, camera: null, i2c: [], streaming: false, cameraAsked: false,
-    streamWanted: false, cfg: false, config: null, cfgError: null,
+    known: false, camera: null, streaming: false,
+    /* The person's choice survives a change of source; it was never the
+       board's to make. */
+    streamWanted: state.peripherals.streamWanted, cfg: false, config: null, cfgError: null,
   };
   state.firmware = [];
+  state.wiring = emptyWiring();
   state.workOrder = null;
   state.attempts = [];
   state.device.link = 'offline';
@@ -554,6 +691,7 @@ export function resetAll() {
   state.device.app = null;
   state.device.appState = null;
   state.device.appLoops = null;
+  state.device.rxBytes = null;
   state.device.bootId = null;
   state.device.reset = null;
   state.device.reboots = 0;

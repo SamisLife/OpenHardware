@@ -26,31 +26,59 @@ const OUTCOME = {
 };
 
 let el = {};
+let handlers = {};
 
-export function mountFirmware(root) {
+export function mountFirmware(root, opts = {}) {
+  handlers = opts;
   el = {
     body:   root.querySelector('[data-fw=body]'),
     empty:  root.querySelector('[data-fw=empty]'),
     memory: root.querySelector('[data-fw=memory]'),
     memEmpty: root.querySelector('[data-fw=mem-empty]'),
   };
+  /* One delegated listener: the rows are rebuilt wholesale on every render, so
+     a listener bound to a button would be lost the next time anything moved. */
+  el.body?.addEventListener('click', ev => {
+    const btn = ev.target.closest?.('[data-flash]');
+    if (btn && !btn.disabled) handlers.onFlash?.(btn.dataset.flash);
+  });
 }
 
 export function renderFirmware(state) {
   const rows = state.firmware;
   el.empty.hidden = rows.length > 0;
 
+  /* A flash needs a linked board, and only one runs at a time. Both buttons
+     everywhere reflect that: disabled with no board, disabled while any flash
+     is in flight, and the one row being written says so in place of a button. */
+  const linked = state.device.link === 'linked';
+  const flashing = state.ui.flashing || null;
+
   const html = rows.map(f => {
     const o = OUTCOME[f.outcome] || OUTCOME.superseded;
+    /* Flashable when there is an immutable build with an image behind it. A
+       failed build has no hash and nothing to write. */
+    const canFlash = !!f.buildId && !!f.sha;
+    const isThis = flashing && flashing.buildId === f.buildId;
+    let action = '';
+    if (canFlash) {
+      action = isThis
+        ? '<span class="fw__flashing">Flashing…</span>'
+        : `<button type="button" class="btn btn--small fw__flash" data-flash="${esc(f.buildId)}"`
+          + `${linked && !flashing ? '' : ' disabled'}`
+          + `${!linked ? ' title="Link a board first"' : flashing ? ' title="A flash is already in progress"' : ''}`
+          + '>Flash</button>';
+    }
     return `
-      <tr data-outcome="${f.outcome}">
+      <tr data-outcome="${f.outcome}"${f.buildId ? ` data-build="${esc(f.buildId)}"` : ''}>
         <td class="fw__ver">${esc(f.version)}</td>
         <td class="fw__sha">${esc((f.sha || '').slice(0, 7) || NIL)}</td>
         <td class="fw__size">${Number.isFinite(f.bytes) ? (f.bytes / 1024).toFixed(0) + ' KB' : NIL}</td>
         <td class="fw__time">${clock(f.builtAt)}</td>
         <td class="fw__outcome"><span class="tag" data-tone="${o.tone}">${o.label}</span></td>
+        <td class="fw__do">${action}</td>
       </tr>
-      ${f.note ? `<tr class="fw__noterow"><td colspan="5"><span class="fw__note">${esc(f.note)}</span></td></tr>` : ''}
+      ${f.note ? `<tr class="fw__noterow"><td colspan="6"><span class="fw__note">${esc(f.note)}</span></td></tr>` : ''}
     `;
   }).join('');
 

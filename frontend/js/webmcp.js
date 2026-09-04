@@ -41,7 +41,7 @@
 
 import {
   state, subscribe, waitForState,
-  applyPeripherals, applyFirmware, applyWorkOrder, upsertAttempt, pushLimit, applyAgent, applyGate,
+  applyPeripherals, applyFirmware, applyWorkOrder, upsertAttempt, pushLimit, applyAgent, applyGate, applyUi,
 } from './state.js';
 import { LADDER, fbBytes, label } from './builder/plan.js';
 import { requestGate } from './builder/gate.js';
@@ -242,8 +242,8 @@ function readTools(fx) {
       title: 'Board identity, capabilities and the frame-size ladder',
       description:
         'Identity and capabilities of the board this page is attached to: board name, MCU, '
-        + 'MAC, firmware version and slot, link state, which source is driving the page '
-        + '(sim or usb), what is attached (camera state and sensor, I2C addresses), whether '
+        + 'MAC, firmware version and slot, inbound byte count, link state, which source is driving the page '
+        + '(sim or usb), what is attached (camera state and sensor, the wiring list), whether '
         + 'the board supports runtime camera configuration (cfg), and the frame-size ladder '
         + 'with the PSRAM each size costs. Call this first; every other tool assumes it. '
         + 'While link is not "linked", bringUp says which step the page is waiting on and what '
@@ -261,6 +261,7 @@ function readTools(fx) {
             harness: { ...d.firmware },
             firmware: { ...d.firmware },
             app: d.app, appState: d.appState, appLoops: d.appLoops,
+            rxBytes: d.rxBytes,
             activeBuild: state.firmware.find(row =>
               String(row.sha || '').toLowerCase() === String(d.firmware.sha || '').toLowerCase())?.buildId || null,
             bootId: d.bootId, reset: d.reset, reboots: d.reboots,
@@ -268,13 +269,14 @@ function readTools(fx) {
           },
           reporting: !!state.telemetry.latest,
           peripherals: {
-            known: p.known, camera: p.camera, i2c: p.i2c, streaming: p.streaming,
+            known: p.known, camera: p.camera, streaming: p.streaming,
             cfgSupported: !!p.cfg, config: p.config,
             running: p.config
               ? { ...p.config, from: 'caps' }
               : runningSize() ? { ...runningSize(), quality: state.frame.jpegQuality || null, from: 'frame' } : null,
           },
           limits: { ...lim },
+          wiring: wiringView(),
           /* Only while there is something to do about it. A linked board has
              no bring-up left to describe. */
           bringUp: linked() ? null : orient(guide(fx)),
@@ -377,6 +379,54 @@ function readTools(fx) {
           }
         }
         return record;
+      },
+    },
+
+    {
+      name: 'get_wiring',
+      title: 'What is attached to the board, and how that is known',
+      description:
+        'The wiring list: every part attached beyond the board itself, each with how it is known. '
+        + '"detected" means the board found it on its I2C header: an address that acknowledged, '
+        + 'and a name only when the chip identified itself. "declared" means a person typed it in, '
+        + 'which is the only way to know about anything on SPI, UART, a GPIO or an analog pin. '
+        + '`confirmed` says a person or the silicon vouched for the name; an unconfirmed detected '
+        + 'part is a guess from a table of common addresses, listed under `candidates`. `present` '
+        + 'is false for a detected part that stopped answering, null for a declared one. Also the '
+        + 'last scan and how many questions await a person. Read this before writing firmware '
+        + 'that talks to anything.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      execute: async () => ({ ok: true, ...wiringView() }),
+    },
+
+    {
+      name: 'scan_bus',
+      title: 'Probe the I2C header for anything that acknowledges',
+      description:
+        'Ask the board to scan its expansion I2C header (default D4/D5, GPIO5/GPIO6 on the XIAO '
+        + 'ESP32S3; other pins may be given) and fold the answer into the wiring list. Takes a few '
+        + 'hundred milliseconds and changes nothing on the board. Anything new is put to the person '
+        + 'as a question on the page; adding or confirming a part is theirs, never a tool. A bus '
+        + 'held low is reported as bus_stuck rather than as empty. Fails with "no board is linked" '
+        + 'until a board is linked.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sda: { type: 'integer', minimum: 0, maximum: 48 },
+          scl: { type: 'integer', minimum: 0, maximum: 48 },
+        },
+        additionalProperties: false,
+      },
+      annotations: { readOnlyHint: true },
+      execute: async input => {
+        if (!linked()) return notLinked(fx);
+        const scan = await fx.scan?.({ sda: input?.sda, scl: input?.scl });
+        if (!scan) return { ok: false, error: 'the page has no way to ask the board' };
+        if (scan.ok === false) {
+          return { ok: false, error: scan.error || scan.err || 'the scan failed', line: scan.line || null, scan };
+        }
+        return { ok: true, ...wiringView() };
       },
     },
 
@@ -832,51 +882,8 @@ function writeTools(fx) {
         properties: { buildId: { type: 'string', minLength: 1, maxLength: 40 } },
         additionalProperties: false,
       },
-      execute: async (input, { signal } = {}) => {
-        if (!linked()) return notLinked(fx);
-        const buildId = String(input?.buildId || '').trim();
-        const build = await fx.build?.get(buildId);
-        if (!build?.ok || build.status !== 'built' || !build.image?.artifact) {
-          return { ok: false, error: `build ${buildId || '(missing)'} is not a flashable successful build` };
-        }
-        if (build.image.activation_protocol !== 2) {
-          return { ok: false, error: `build ${buildId} predates the self-confirming harness (protocol 2); rebuild its source against the current harness` };
-        }
-        const app = build.app || {};
-        const attempt = state.attempts.find(row => row.buildId === buildId);
-        if (attempt) upsertAttempt({ n: attempt.n, status: 'gated',
-          steps: [{ id: 'flash', label: 'FLASH', status: 'running', detail: 'waiting for operator approval' }] });
-        const outcome = await gated(fx, {
-          action: `Write build ${buildId} · ${app.name || 'app'} ${app.version || ''} to the inactive OTA slot`,
-          rationale: 'An agent asked to activate one immutable candidate. The factory baseline and stored data remain untouched.',
-          signal,
-        }, async () => {
-          if (attempt) upsertAttempt({ n: attempt.n, status: 'running',
-            steps: [{ id: 'flash', label: 'FLASH', status: 'running', detail: 'writing inactive OTA slot' }] });
-          const result = await fx.flash({ buildId, imageBase: fx.build.artifactBase(buildId) });
-          const fault = result?.fault || null;
-          const reply = {
-            ok: !!result?.flashDone && !fault,
-            written: !!result?.flashDone,
-            buildId,
-            phase: result?.phase || null,
-            fault,
-          };
-          if (attempt) upsertAttempt({
-            n: attempt.n, status: reply.ok ? 'passed' : 'failed',
-            verdict: reply.ok ? 'FLASHED' : 'FLASH FAILED',
-            durationMs: Date.now() - attempt.startedAt,
-            steps: [{ id: 'flash', label: 'FLASH', status: reply.ok ? 'pass' : 'fail',
-                      detail: reply.ok ? 'candidate booted and reported' : fault?.detail || 'flash did not complete' }],
-          });
-          return reply;
-        });
-        if (attempt && outcome?.refused) upsertAttempt({ n: attempt.n, status: 'built', verdict: 'BUILT',
-          steps: [{ id: 'flash', label: 'FLASH', status: 'skipped', detail: `operator ${outcome.refused}` }] });
-        else if (attempt && !outcome?.ok) upsertAttempt({ n: attempt.n, status: 'failed', verdict: 'FLASH FAILED',
-          steps: [{ id: 'flash', label: 'FLASH', status: 'fail', detail: outcome?.error || 'flash did not complete' }] });
-        return outcome;
-      },
+      execute: (input, { signal } = {}) =>
+        flashBuild(fx, String(input?.buildId || '').trim(), { signal, requestedBy: 'agent' }),
     },
 
     {
@@ -888,18 +895,24 @@ function writeTools(fx) {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       execute: async (_input, { signal } = {}) => {
         if (!linked()) return notLinked(fx);
+        if (state.ui.flashing) return { ok: false, refused: 'busy', error: 'a flash is already in progress' };
         const baseline = await fx.build?.baseline();
         if (!baseline?.ok) return { ok: false, error: baseline?.error || 'the baseline image has not been built yet' };
-        return gated(fx, {
-          action: `Restore factory baseline ${baseline.version || ''} · ${baseline.app?.name || 'default'} ${baseline.app?.version || ''}`,
-          rationale: 'This replaces the factory image with the committed minimal baseline and reboots the board. It does not erase stored data.',
-          signal,
-        }, async () => {
-          const result = await fx.flash({ baseline: true, imageBase: fx.build.baselineBase });
-          const fault = result?.fault || null;
-          return { ok: !!result?.flashDone && !fault, written: !!result?.flashDone, baseline: true,
-                   phase: result?.phase || null, fault };
-        });
+        applyUi({ flashing: { baseline: true } });
+        try {
+          return await gated(fx, {
+            action: `Restore factory baseline ${baseline.version || ''} · ${baseline.app?.name || 'default'} ${baseline.app?.version || ''}`,
+            rationale: 'This replaces the factory image with the committed minimal baseline and reboots the board. It does not erase stored data.',
+            signal, requestedBy: 'agent',
+          }, async () => {
+            const result = await fx.flash({ baseline: true, imageBase: fx.build.baselineBase });
+            const fault = result?.fault || null;
+            return { ok: !!result?.flashDone && !fault, written: !!result?.flashDone, baseline: true,
+                     phase: result?.phase || null, fault };
+          });
+        } finally {
+          applyUi({ flashing: null });
+        }
       },
     },
 
@@ -1056,15 +1069,110 @@ async function runExperiment(fx, input, { signal } = {}) {
  * same block the loop's gate uses. Held and cancelled both end here without
  * touching the board: a tool's gate guards a write that cannot be undone.
  */
-async function gated(fx, { action, rationale, signal }, run) {
+/**
+ * Write one immutable candidate build to the inactive OTA slot, behind the gate.
+ *
+ * The one flash path, whoever asked: the flash_image tool calls this with
+ * requestedBy 'agent', the Flash button on the Images panel with 'operator'.
+ * Both go through the same gate (a person still presses Approve, even when a
+ * person asked — the gate is where the decision is recorded, and a click on a
+ * row is easy to make by accident), the same session flash, and both leave
+ * their attempt in the same build log. An attempt is made for the build when
+ * none exists yet, so a human flash is as visible afterwards as an agent's.
+ *
+ * @returns {{ok, written, buildId, phase, fault, refused?, error?}}
+ */
+export async function flashBuild(fx, buildId, { signal = null, requestedBy = 'agent' } = {}) {
+  if (!linked()) return notLinked(fx);
+  if (state.ui.flashing) return { ok: false, refused: 'busy', error: `a flash of ${state.ui.flashing.buildId || 'an image'} is already in progress` };
+  const build = await fx.build?.get(buildId);
+  if (!build?.ok || build.status !== 'built' || !build.image?.artifact) {
+    return { ok: false, error: `build ${buildId || '(missing)'} is not a flashable successful build` };
+  }
+  if (build.image.activation_protocol !== 2) {
+    return { ok: false, error: `build ${buildId} predates the self-confirming harness (protocol 2); rebuild its source against the current harness` };
+  }
+  const app = build.app || {};
+  let attempt = state.attempts.find(row => row.buildId === buildId);
+  if (!attempt) {
+    ensureWorkOrder();
+    upsertAttempt({
+      n: nextAttemptNumber(), buildId, by: requestedBy, status: 'gated',
+      verdict: 'AWAITING APPROVAL', firmware: app.name ? `${app.name} ${app.version || ''}`.trim() : null,
+      startedAt: Date.now(), durationMs: 0,
+      steps: [{ id: 'compile', label: 'BUILD', status: 'pass', detail: `immutable build ${buildId}` }],
+    });
+    attempt = state.attempts.find(row => row.buildId === buildId);
+  }
+  const step = (status, detail) => ({ id: 'flash', label: 'FLASH', status, detail });
+  /* The image row's Outcome column follows the flash too, so the panel a
+     person is looking at says the same thing the build log does. `active` is
+     left to the confirming hello (feed.js), which is the only honest source
+     for "the board is running exactly this". */
+  const patchRow = (outcome, note) => applyFirmware(state.firmware.map(row =>
+    row.buildId === buildId ? { ...row, outcome, ...(note !== undefined ? { note } : {}) } : row));
+  upsertAttempt({ n: attempt.n, status: 'gated', steps: [step('running', 'waiting for operator approval')] });
+
+  const who = requestedBy === 'operator' ? 'The operator' : 'An agent';
+  applyUi({ flashing: { buildId } });
+  let outcome;
+  try {
+  outcome = await gated(fx, {
+    action: `Write build ${buildId} · ${app.name || 'app'} ${app.version || ''} to the inactive OTA slot`,
+    rationale: `${who} asked to activate one immutable candidate. The factory baseline and stored data remain untouched.`,
+    signal, requestedBy,
+  }, async () => {
+    upsertAttempt({ n: attempt.n, status: 'running', steps: [step('running', 'writing inactive OTA slot')] });
+    patchRow('flashing', null);
+    const result = await fx.flash({ buildId, imageBase: fx.build.artifactBase(buildId) });
+    const fault = result?.fault || null;
+    const reply = {
+      ok: !!result?.flashDone && !fault,
+      written: !!result?.flashDone,
+      buildId,
+      phase: result?.phase || null,
+      fault,
+    };
+    const activated = reply.ok;
+    const wroteOnly = reply.written && !!fault;
+    upsertAttempt({
+      n: attempt.n, status: activated ? 'passed' : 'failed',
+      verdict: activated ? 'FLASHED' : wroteOnly ? 'ACTIVATION FAILED' : 'FLASH FAILED',
+      durationMs: Date.now() - attempt.startedAt,
+      steps: wroteOnly
+        ? [
+            step('pass', 'candidate bytes written to inactive OTA slot'),
+            { id: 'activate', label: 'ACTIVATE', status: 'fail',
+              detail: fault.raw || fault.observed || 'candidate was not activated' },
+          ]
+        : [step(activated ? 'pass' : 'fail',
+                activated ? 'candidate booted and reported' : fault?.raw || fault?.observed || 'flash did not complete')],
+    });
+    if (activated) patchRow('active', null);
+    else if (wroteOnly) patchRow(fault.code === 'rolled_back' ? 'rolled_back' : 'failed',
+                                 fault.raw || fault.observed || 'candidate was not activated');
+    else patchRow('failed', fault?.raw || fault?.observed || 'flash did not complete');
+    return reply;
+  });
+  } finally {
+    applyUi({ flashing: null });
+  }
+  if (outcome?.refused) upsertAttempt({ n: attempt.n, status: 'built', verdict: 'BUILT',
+    steps: [step('skipped', `operator ${outcome.refused}`)] });
+  else if (!outcome?.ok && outcome?.error) upsertAttempt({ n: attempt.n, status: 'failed', verdict: 'FLASH FAILED',
+    steps: [step('fail', outcome?.error || 'flash did not complete')] });
+  return outcome;
+}
+
+async function gated(fx, { action, rationale, signal, requestedBy = 'agent' }, run) {
   const policy = 'waits for the operator — nothing happens until Approve';
   let verdict;
   try {
     verdict = await requestGate({
       action, rationale, policy, timeoutMs: null, signal,
       onState: st => applyGate(st === 'pending'
-        ? { state: 'pending', action, rationale, policy, requestedBy: 'agent', requestedAt: Date.now() }
-        : { state: st, action, rationale, policy, requestedBy: 'agent', answeredAt: Date.now() }),
+        ? { state: 'pending', action, rationale, policy, requestedBy, requestedAt: Date.now() }
+        : { state: st, action, rationale, policy, requestedBy, answeredAt: Date.now() }),
     });
   } catch (err) {
     return { ok: false, refused: 'busy', error: err.message };
@@ -1102,6 +1210,26 @@ function learnedLimits() {
 }
 
 /* ---- small helpers ----------------------------------------------------- */
+
+/** The wiring list as the tools hand it over: parts, the last scan, the open questions. */
+function wiringView() {
+  const w = state.wiring;
+  const s = w.scan;
+  return {
+    parts: w.parts.map(p => ({
+      name: p.name, how: p.how, bus: p.bus, addr: p.addr ?? null, pins: p.pins || [],
+      id: p.id || null, confirmed: !!p.confirmed, confirmedBy: p.confirmedBy || null,
+      candidates: p.confirmed ? [] : (p.candidates || []),
+      present: p.present ?? null, note: p.note || null,
+    })),
+    scan: s ? {
+      at: s.at, ok: s.ok !== false, bus: s.bus || null, sda: s.sda ?? null, scl: s.scl ?? null,
+      ms: s.ms ?? null, error: s.ok === false ? (s.err || null) : null, line: s.line || null,
+      found: (s.found || []).map(f => ({ addr: f.addr, id: f.id || null })),
+    } : null,
+    asks: w.asks.length,
+  };
+}
 
 /** The guide, cut to what get_board needs: the phase, the wait, the next step. */
 function orient(g) {
@@ -1195,6 +1323,10 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
   applyAgent({ available: true });
 
   let quietTimer = 0;
+  /* Calls in flight. The quiet timer is armed only when the last of them
+     ends: armed per call, the timer of a short call would outlive a long one
+     started beside it and report the agent quiet while it was still working. */
+  let inFlight = 0;
 
   /* Presence, inferred from calls. Wrapped once here so no tool has to
      remember to report itself.
@@ -1207,6 +1339,7 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
     ...tool,
     execute: async (input, ctx = {}) => {
       clearTimeout(quietTimer);
+      inFlight++;
       applyAgent({ seen: true, tool: tool.name, calls: (state.ui.agent.calls || 0) + 1,
                    lastAt: Date.now(), quiet: false });
       let result;
@@ -1220,8 +1353,12 @@ export function mountTools({ fx = {}, modelContext, quietMs = QUIET_MS } = {}) {
       } catch (err) {
         result = { ok: false, error: err?.message || String(err) };
       } finally {
-        applyAgent({ tool: null, lastAt: Date.now() });
-        quietTimer = setTimeout(() => applyAgent({ quiet: true }), quietMs);
+        inFlight--;
+        applyAgent({ tool: inFlight ? state.ui.agent.tool : null, lastAt: Date.now() });
+        if (!inFlight) {
+          clearTimeout(quietTimer);
+          quietTimer = setTimeout(() => applyAgent({ quiet: true }), quietMs);
+        }
       }
       return envelope(fx, result);
     },

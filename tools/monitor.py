@@ -391,6 +391,8 @@ class Watch:
         self.app_identity = None
         self.app_state = None
         self.app_beat_seen = False
+        self.rx_bytes = None
+        self.rx_rescued = 0
 
     # ---- boots ----------------------------------------------------------
 
@@ -445,6 +447,18 @@ class Watch:
                                      app.get('state', 'unreported'),
                                      ' · %s crash boots' % crashes
                                      if crashes is not None else ''))
+            rx = f.get('rx')
+            if isinstance(rx, int) and rx != self.rx_bytes:
+                if self.rx_bytes is not None:
+                    self.out.line('meta', '   inbound bytes %s -> %s' % (self.rx_bytes, rx))
+                self.rx_bytes = rx
+            # Bytes the harness took straight out of the OUT FIFO because they
+            # landed before its driver existed. A non-zero count is the boot
+            # window's early write being rescued rather than blocking the port.
+            rescued = f.get('rx_rescued')
+            if isinstance(rescued, int) and rescued and rescued != self.rx_rescued:
+                self.out.line('meta', '   %s bytes rescued from the USB OUT FIFO at boot' % rescued)
+                self.rx_rescued = rescued
             return
 
         if t == 'beat':
@@ -462,6 +476,19 @@ class Watch:
                 self.out.line('frame', '< img #%s · %sx%s · %s bytes in %s chunks'
                               % (f.get('seq'), f.get('w'), f.get('h'),
                                  f.get('bytes'), f.get('chunks')))
+            return
+
+        if t == 'scan_ack':
+            if f.get('ok'):
+                found = f.get('found') or []
+                names = ', '.join('0x%02x%s' % (d.get('addr', 0), (' (%s)' % d['id']) if d.get('id') else '')
+                                  for d in found)
+                self.out.line('frame', '< scan_ack i2c0 sda %s scl %s · %s found in %s ms%s'
+                              % (f.get('sda'), f.get('scl'), len(found), f.get('ms'),
+                                 (' · ' + names) if names else ''))
+            else:
+                self.out.line('frame', '< scan_ack failed · %s%s'
+                              % (f.get('err'), (' (%s low)' % f['line']) if f.get('line') else ''))
             return
 
         if t == 'cam_ack':
@@ -828,6 +855,8 @@ def main():
 
     p.add_argument('--cam', action='store_true',
                    help='turn the camera on, then count the pictures that arrive')
+    p.add_argument('--scan', action='store_true',
+                   help='scan the default I2C header after the board says it is running')
     p.add_argument('--cfg', metavar='SIZE',
                    help='set QQVGA, QVGA, CIF, HVGA, VGA, SVGA, XGA, HD, SXGA or UXGA')
     p.add_argument('--quality', type=int, metavar='N',
@@ -846,6 +875,8 @@ def main():
         p.error('--quality requires --cfg')
 
     outbound = []
+    if args.scan:
+        outbound.append({'t': 'scan'})
     if args.cfg:
         config = {'t': 'cfg', 'size': args.cfg.upper()}
         if args.quality is not None:

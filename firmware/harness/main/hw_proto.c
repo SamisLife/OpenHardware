@@ -33,6 +33,8 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "hal/usb_serial_jtag_ll.h"
+#include "soc/usb_serial_jtag_struct.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -46,6 +48,9 @@ static const char *TAG = "hw_proto";
 
 static hw_proto_cb_t s_cb = NULL;
 static uint32_t s_rx_total = 0;
+/* Bytes taken straight out of the peripheral's OUT FIFO because the driver's
+   interrupt was never going to deliver them. See drain_fifo(). */
+static uint32_t s_rx_rescued = 0;
 
 /* Writes are serialised: several tasks emit, and an interleaved frame is a
    corrupt frame that the far end will reject on its CRC. */
@@ -165,6 +170,7 @@ void hw_proto_status(const char *stage, const char *detail)
 }
 
 uint32_t hw_proto_rx_bytes(void) { return s_rx_total; }
+uint32_t hw_proto_rx_rescued(void) { return s_rx_rescued; }
 
 /* ------------------------------------------------------------------------ */
 /* pictures                                                                  */
@@ -338,36 +344,103 @@ static void dispatch(char *line, size_t len)
     if (s_cb) s_cb(type, payload);
 }
 
+/** Inbound bytes, wherever they came from, into lines and out to the parser. */
+static void take_bytes(const uint8_t *chunk, int n)
+{
+    /* Said once, the first time anything at all arrives. Whether the host
+       can reach this task is the one fact that cannot be deduced from the
+       other end. */
+    if (s_rx_total == 0) ESP_LOGI(TAG, "first inbound bytes on USB");
+    s_rx_total += (uint32_t)n;
+
+    for (int i = 0; i < n; i++) {
+        char c = (char)chunk[i];
+        if (c == '\n' || c == '\r') {
+            if (s_line_len) {
+                s_line[s_line_len] = '\0';
+                dispatch(s_line, s_line_len);
+                s_line_len = 0;
+            }
+            continue;
+        }
+        /* An over-long line is not a frame. Dropping it and resynchronising
+           on the next newline costs one line; truncating it into something
+           that might accidentally validate costs trust in all of them. */
+        if (s_line_len >= HW_LINE_MAX - 1) { s_line_len = 0; continue; }
+        s_line[s_line_len++] = c;
+    }
+}
+
+/*
+ * ----------------------------------------------------------------------------
+ * A PACKET THAT ARRIVES BEFORE THE DRIVER IS A PACKET THAT BLOCKS THE PORT
+ *
+ * The USB-serial-JTAG peripheral holds one OUT packet in a 64-byte FIFO and
+ * NAKs every further packet until that one has been read out. It is not reset
+ * with the chip, so a packet still sitting there survives a reboot. The
+ * driver reads the FIFO from its interrupt, and that interrupt fires when a
+ * packet lands; a packet that landed BEFORE usb_serial_jtag_driver_install()
+ * raised nothing the driver ever saw, and install clears the pending status
+ * on its way in. From then on the FIFO is full, no interrupt will ever fire
+ * for it, and the host's writes are accepted by its operating system and
+ * NAKed by the board for as long as the board runs. Measured on the bench:
+ * a page that reopens the port and asks straight away, while the board is
+ * still booting, leaves it deaf until the ROM downloader (the next flash)
+ * empties the FIFO. Every "written but no acknowledgement, receive count
+ * 0 -> 0" was this.
+ *
+ * So the FIFO is read directly, twice over: once before the driver is
+ * installed, taking whatever the boot window collected; and from the receive
+ * task whenever the driver has gone quiet while the peripheral says it holds
+ * data and no interrupt is pending for it. The interrupt is masked around
+ * the direct read so the driver cannot read the same bytes half way.
+ * ----------------------------------------------------------------------------
+ */
+static void drain_fifo(bool driver_up)
+{
+    uint8_t chunk[64];
+    int total = 0;
+
+    if (driver_up) usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    while (usb_serial_jtag_ll_rxfifo_data_available()) {
+        int n = (int)usb_serial_jtag_ll_read_rxfifo(chunk, sizeof(chunk));
+        if (n <= 0) break;
+        total += n;
+        take_bytes(chunk, n);
+    }
+    if (driver_up) {
+        usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+        usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT);
+    }
+    if (total) {
+        s_rx_rescued += (uint32_t)total;
+        ESP_LOGW(TAG, "%d bytes taken from the USB OUT FIFO %s the driver", total,
+                 driver_up ? "behind" : "before");
+    }
+}
+
 static void rx_task(void *arg)
 {
     (void)arg;
     uint8_t chunk[128];
+    int quiet = 0;
 
     for (;;) {
         int n = usb_serial_jtag_read_bytes(chunk, sizeof(chunk), pdMS_TO_TICKS(100));
-        if (n <= 0) continue;
+        if (n > 0) {
+            quiet = 0;
+            take_bytes(chunk, n);
+            continue;
+        }
 
-        /* Said once, the first time anything at all arrives. Whether the host
-           can reach this task is the one fact that cannot be deduced from the
-           other end. */
-        if (s_rx_total == 0) ESP_LOGI(TAG, "first inbound bytes on USB");
-        s_rx_total += (uint32_t)n;
-
-        for (int i = 0; i < n; i++) {
-            char c = (char)chunk[i];
-            if (c == '\n' || c == '\r') {
-                if (s_line_len) {
-                    s_line[s_line_len] = '\0';
-                    dispatch(s_line, s_line_len);
-                    s_line_len = 0;
-                }
-                continue;
-            }
-            /* An over-long line is not a frame. Dropping it and resynchronising
-               on the next newline costs one line; truncating it into something
-               that might accidentally validate costs trust in all of them. */
-            if (s_line_len >= HW_LINE_MAX - 1) { s_line_len = 0; continue; }
-            s_line[s_line_len++] = c;
+        /* Nothing from the driver for half a second while the peripheral
+           reports an unread packet and no interrupt pending for it: the
+           driver is not going to deliver it. */
+        if (++quiet < 5) continue;
+        quiet = 0;
+        if (usb_serial_jtag_ll_rxfifo_data_available()
+            && !(usb_serial_jtag_ll_get_intraw_mask() & USB_SERIAL_JTAG_INTR_SERIAL_OUT_RECV_PKT)) {
+            drain_fifo(true);
         }
     }
 }
@@ -380,6 +453,12 @@ esp_err_t hw_proto_init(hw_proto_cb_t on_frame)
 
     s_img_lock = xSemaphoreCreateMutex();
     if (!s_img_lock) return ESP_ERR_NO_MEM;
+
+    /* Whatever the host sent while this image was still booting is sitting in
+       the peripheral, and installing the driver over it would seal it there.
+       Taken first, so the driver starts with an empty FIFO and a working
+       interrupt. */
+    drain_fifo(false);
 
     usb_serial_jtag_driver_config_t cfg = {
         .tx_buffer_size = TX_BUF_SZ,

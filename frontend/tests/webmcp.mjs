@@ -29,7 +29,7 @@ globalThis.requestAnimationFrame = fn => setTimeout(() => fn(0), 0);
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
 const st = await load('state.js');
-const { mountTools, summarize, configEffector } = await load('webmcp.js');
+const { mountTools, summarize, configEffector, flashBuild } = await load('webmcp.js');
 const { approvePending, holdPending, pendingGate } = await load('builder/gate.js');
 const { SimBoard } = await load('link/sim.js');
 const { createFeed } = await load('link/feed.js');
@@ -112,6 +112,13 @@ const fx = {
   provision: async (ssid, psk) => { provisioned = { ssid, hasPsk: !!psk }; },
   manifest: async () => ({ version: '0.12.0', project: 'openhardware_harness', elf_sha8: 'abc', total_bytes: 880384, parts: [] }),
   source: () => 'sim',
+  /* The page's scan: ask the board, wait for the feed to fold the answer in. */
+  scan: async opts => {
+    const before = st.state.wiring.scan;
+    await link.send({ t: 'scan', ...(opts || {}) });
+    const answered = await st.waitForState(s => s.wiring.scan !== before, { timeoutMs: 2000 });
+    return answered ? st.state.wiring.scan : { ok: false, error: 'no answer' };
+  },
   /* A stand-in for the session's guide: one phase, one next step. */
   bringUp: () => ({ phase: 'idle', next: 'Press "Connect a board" and choose the port.',
                     waitingOn: { who: 'person', what: 'Press "Connect a board" and choose the port.', options: [] },
@@ -126,7 +133,7 @@ const call = async (name, input = {}, signal) => {
   return tool.execute(input, { signal });
 };
 
-const READ = ['capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
+const READ = ['get_wiring', 'scan_bus', 'capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
 const PAGE = ['build_firmware', 'record_attempt'];
 const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baseline', 'run_experiment', 'set_camera', 'set_camera_config', 'watch_for'];
 
@@ -337,6 +344,53 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
 }
 
 /* ------------------------------------------------------------------------ */
+/* the Flash button and the tool are one path                               */
+/* ------------------------------------------------------------------------ */
+
+{
+  /* The Images-panel Flash button calls flashBuild with requestedBy operator.
+     It must reach the same gate, mark the same in-flight flag, and leave an
+     attempt in the same build log — so a human flash is as visible and as
+     safe as an agent's. */
+  st.state.attempts = [];
+  const before = flashed;
+  const p = flashBuild(fx, 'human1', { requestedBy: 'operator' });
+  await wait(20);
+  ok('a human flash still waits on the gate', pendingGate() !== null && st.state.gate?.state === 'pending');
+  ok('and the gate names the operator, not an agent', st.state.gate?.requestedBy === 'operator');
+  ok('the flash is marked in flight while it waits', st.state.ui.flashing?.buildId === 'human1');
+  ok('an attempt is opened in the build log for it',
+     st.state.attempts.some(a => a.buildId === 'human1' && a.by === 'operator'));
+  ok('nothing is written before approval', flashed === before);
+
+  approvePending();
+  const done = await p;
+  ok('approve writes it through the same flash path', done.ok === true && flashed === before + 1, JSON.stringify(done));
+  ok('the in-flight flag is cleared afterwards', st.state.ui.flashing === null);
+  ok('and the attempt records the outcome', st.state.attempts.find(a => a.buildId === 'human1')?.status === 'passed');
+}
+
+{
+  /* Only one flash at a time, whichever asked: a second while one is in flight
+     is refused as busy without touching the board. */
+  st.applyUi({ flashing: { buildId: 'other' } });
+  const busy = await flashBuild(fx, 'human2', { requestedBy: 'operator' });
+  ok('a flash while one is already running is refused as busy',
+     busy.ok === false && busy.refused === 'busy', JSON.stringify(busy));
+  const agentBusy = await call('flash_image', { buildId: 'human2' });
+  ok('and the tool refuses it too, one path for both', agentBusy.refused === 'busy');
+  st.applyUi({ flashing: null });
+}
+
+{
+  /* A build that is not a flashable success is refused before any gate. */
+  const bad = { ...fx, build: { ...fx.build, get: async id => ({ ok: true, id, status: 'failed' }) } };
+  const r = await flashBuild(bad, 'nope', { requestedBy: 'operator' });
+  ok('an unbuilt or failed build is refused, no gate raised',
+     r.ok === false && pendingGate() === null, JSON.stringify(r));
+}
+
+/* ------------------------------------------------------------------------ */
 /* the rest of the belt                                                      */
 /* ------------------------------------------------------------------------ */
 
@@ -362,6 +416,24 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
 }
 
 /* ------------------------------------------------------------------------ */
+/* the wiring list                                                          */
+/* ------------------------------------------------------------------------ */
+
+{
+  const scan = await call('scan_bus', {});
+  ok('a scan answers with what acknowledged on the header',
+     scan.ok === true && scan.scan?.found?.length === 2, JSON.stringify(scan.scan));
+  const w = await call('get_wiring');
+  ok('the wiring list carries each part with how it is known',
+     w.parts.some(p => p.addr === 0x3c && p.how === 'detected' && p.confirmed === false && p.candidates.length > 0)
+       && w.parts.some(p => p.name === 'BME280' && p.confirmed === true && p.confirmedBy === 'chip'),
+     JSON.stringify(w.parts));
+  ok('and says a person still has a question to answer', w.asks === 1);
+  ok('the board report carries the same list', (await call('get_board')).wiring.parts.length === 2);
+  ok('adding or confirming a part is not a tool', !mc.names().some(n => /confirm|add_part|declare|ignore/i.test(n)));
+}
+
+/* ------------------------------------------------------------------------ */
 /* presence, inferred from calls                                             */
 /* ------------------------------------------------------------------------ */
 
@@ -370,7 +442,9 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
   mounted.dispose();
   st.applyAgent({ seen: false, tool: null, calls: 0, lastAt: 0, quiet: false });
   const mc2 = fakeModelContext();
-  const m2 = mountTools({ fx, modelContext: mc2, quietMs: 150 });
+  /* A wide margin between the call's own timeout and the quiet timer, because
+     timer jitter on a busy machine is not what this block is about. */
+  const m2 = mountTools({ fx, modelContext: mc2, quietMs: 400 });
 
   ok('before any call, no agent has been seen', st.state.ui.agent.seen === false);
 
@@ -380,10 +454,11 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
   ok('and that an agent has been seen', st.state.ui.agent.seen === true);
   await running;
   ok('after the call the tool is cleared', st.state.ui.agent.tool === null);
-  ok('but the agent is still known to be there', st.state.ui.agent.seen === true && st.state.ui.agent.quiet === false);
+  ok('but the agent is still known to be there', st.state.ui.agent.seen === true && st.state.ui.agent.quiet === false,
+     JSON.stringify(st.state.ui.agent));
   ok('calls are counted', st.state.ui.agent.calls === 1, st.state.ui.agent.calls);
 
-  await wait(220);
+  await wait(600);
   ok('silence for long enough is reported as quiet', st.state.ui.agent.quiet === true);
 
   await mc2.get('get_board').execute({}, {});

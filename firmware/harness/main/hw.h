@@ -124,6 +124,15 @@ uint16_t hw_crc16(const char *data, size_t len);
  */
 uint32_t hw_proto_rx_bytes(void);
 
+/**
+ * Bytes read straight out of the USB OUT FIFO because the driver's interrupt
+ * was never going to deliver them: a packet that landed while the image was
+ * still booting, before the driver existed. Reported in the identity frame so
+ * a host can see that its early writes were taken rather than lost, and so a
+ * non-zero count here explains an acknowledgement that took longer than usual.
+ */
+uint32_t hw_proto_rx_rescued(void);
+
 /** Copy a JSON string field out of `json`. false when it is absent. */
 bool hw_json_str(const char *json, const char *key, char *out, size_t out_len);
 
@@ -237,8 +246,13 @@ bool hw_net_rssi(int *out);
  * oversized frame does not merely arrive late — it occupies the wire long
  * enough for the heartbeat to look like it stopped, which turns one bad
  * capture into an apparently dead board.
+ *
+ * 128 KB, because a busy SVGA scene from the OV3660 at quality 12 is about
+ * 90 KB and the earlier 64 KB refused every frame of it. On the wire that is
+ * some 170 KB of base64, roughly 200 ms at the rate this link drains, well
+ * inside the 1.5 s the page allows the heartbeat.
  */
-#define HW_IMG_MAX_BYTES   (64 * 1024)
+#define HW_IMG_MAX_BYTES   (128 * 1024)
 
 /**
  * Send one JPEG: a header frame, then indexed base64 chunks.
@@ -439,3 +453,22 @@ uint8_t     hw_app_crash_tries(void);
 
 /** Build the bounded `"app":{...}` member placed in every beat. */
 void hw_app_beat_json(char *out, size_t cap);
+
+/* ------------------------------------------------------------------------ */
+/* the expansion I2C header                                                  */
+/* ------------------------------------------------------------------------ */
+
+/** Default lines on the XIAO ESP32S3: D4 and D5. Port 1 belongs to the camera. */
+#define HW_I2C_DEFAULT_SDA 5
+#define HW_I2C_DEFAULT_SCL 6
+#define HW_I2C_SCAN_FIRST  0x08
+#define HW_I2C_SCAN_LAST   0x77
+
+/**
+ * Probe the header for anything that acknowledges, from a task that exists
+ * only for the scan, and answer with one `scan_ack`. Safe from any task.
+ *
+ * ESP_ERR_INVALID_ARG for a pin the camera or the USB peripheral owns,
+ * ESP_ERR_INVALID_STATE while a scan is already running.
+ */
+esp_err_t hw_i2c_request_scan(int sda, int scl);

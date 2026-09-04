@@ -298,10 +298,12 @@ const { mountCamera, renderCamera } = await load('render/camera.js');
 const { mountPeripherals, renderPeripherals } = await load('render/peripherals.js');
 
 {
-  const root = tree(['periph', 'list'], ['periph', 'empty'], ['periph', 'prompt']);
+  const root = tree(['periph', 'list'], ['periph', 'empty'], ['periph', 'ask'], ['periph', 'status']);
   mountPeripherals(root, {});
   const list = find(root, '[data-periph=list]');
   const empty = find(root, '[data-periph=empty]');
+  const ask = find(root, '[data-periph=ask]');
+  const status = find(root, '[data-periph=status]');
 
   S.resetAll();
   renderPeripherals(S.state);
@@ -309,24 +311,77 @@ const { mountPeripherals, renderPeripherals } = await load('render/peripherals.j
   ok('and the empty state says it is waiting rather than claiming nothing exists',
      /waiting/i.test(empty.textContent));
 
-  S.applyPeripherals({ known: true, camera: { state: 'ok', sensor: 'OV2640' }, i2c: [0x76] });
+  S.applyPeripherals({ known: true, camera: { state: 'ok', sensor: 'OV2640' }, streaming: false, streamWanted: true });
+  S.state.ui.cameraShown = false;
   renderPeripherals(S.state);
 
   ok('an identified sensor is listed plainly', /OV2640/.test(list.innerHTML));
-  /* An address is an observation; a part number beside it is inference. */
-  ok('an observed address is listed as an address', /0x76/.test(list.innerHTML));
-  ok('and its candidate part is marked as a guess',
-     /probably BME280/.test(list.innerHTML) && /data-tone="guess"/.test(list.innerHTML));
+  ok('with a glyph beside it', /periph__icon/.test(list.innerHTML));
+  ok('and a detected badge', /data-how="detected"/.test(list.innerHTML));
+  ok('and, with the picture hidden, a Show control', /data-periph="toggle" data-on="true"[^>]*>Show</.test(list.innerHTML));
+  S.state.ui.cameraShown = true;
+  renderPeripherals(S.state);
+  ok('once the picture is wanted the control reads Hide', /data-on="false"[^>]*>Hide</.test(list.innerHTML));
+  S.state.ui.cameraShown = false;
+  S.applyPeripherals({ streaming: true });
+  renderPeripherals(S.state);
+  ok('a hidden picture keeps streaming, and the control still reads Show', /Show</.test(list.innerHTML) && /streaming/.test(list.innerHTML));
+  S.state.ui.cameraShown = true;
+  S.applyPeripherals({ streaming: false });
 
-  S.applyPeripherals({ camera: { state: 'absent', sensor: null }, i2c: [] });
+  /* A scan answers with addresses. One is a bare address: the page guesses
+     and asks. One the silicon named: a fact, listed as such. */
+  S.applyScan({ ok: true, bus: 'i2c0', sda: 5, scl: 6, ms: 140, found: [{ addr: 0x3c }, { addr: 0x76, id: 'BME280' }], at: 1000 });
+  renderPeripherals(S.state);
+  ok('an acknowledged address is listed as an address, with its pins',
+     /0x3c/.test(list.innerHTML) && /D4 \(GPIO5\)/.test(list.innerHTML));
+  ok('and its candidate part is marked as a guess',
+     /probably SSD1306 OLED, or SH1106 OLED/.test(list.innerHTML) && /data-tone="guess"/.test(list.innerHTML));
+  ok('a part the silicon named is listed by name and not guessed at',
+     /BME280/.test(list.innerHTML) && !/probably BME280/.test(list.innerHTML));
+  ok('the person is asked about the unnamed one only',
+     S.state.wiring.asks.length === 1 && ask.hidden === false
+       && /Found <strong>0x3c<\/strong>/.test(ask.innerHTML) && /Is this <strong>SSD1306 OLED<\/strong>\?/.test(ask.innerHTML));
+
+  S.confirmPart('i2c:0x3c', 'SH1106 OLED');
+  renderPeripherals(S.state);
+  ok('a confirmed name replaces the guess and the question goes',
+     /SH1106 OLED/.test(list.innerHTML) && !/probably/.test(list.innerHTML) && ask.hidden === true);
+
+  S.applyScan({ ok: true, bus: 'i2c0', sda: 5, scl: 6, ms: 140, found: [{ addr: 0x76, id: 'BME280' }], at: 2000 });
+  renderPeripherals(S.state);
+  ok('a part that stopped answering is kept, marked, and asked about',
+     /not seen on the last scan/.test(list.innerHTML) && S.state.wiring.asks[0]?.kind === 'missing'
+       && /did not answer on the last scan/.test(ask.innerHTML));
+  S.keepPart('i2c:0x3c');
+  ok('keeping it closes the question and leaves it listed', S.state.wiring.asks.length === 0 && S.state.wiring.parts.length === 2);
+
+  S.addPart({ name: 'WS2812 strip', bus: 'gpio', addr: null, pins: ['D2'], note: '30 LEDs' });
+  renderPeripherals(S.state);
+  ok('a declared part is listed with its badge, its pins and a way off the list',
+     /WS2812 strip/.test(list.innerHTML) && /data-how="declared"/.test(list.innerHTML)
+       && /D2 · 30 LEDs/.test(list.innerHTML) && /data-periph="remove"/.test(list.innerHTML));
+
+  S.applyScan({ ok: false, err: 'bus_stuck', line: 'sda', bus: 'i2c0', sda: 5, scl: 6, at: 3000 });
+  renderPeripherals(S.state);
+  ok('a stuck bus is recorded as a failed scan, not as an empty bus',
+     S.state.wiring.scan.ok === false && S.state.wiring.parts.length === 3 && /SDA is held low/.test(status.textContent));
+  S.applyScan({ ok: false, err: 'no_answer', at: 3500 });
+  renderPeripherals(S.state);
+  ok('a missing reply is said without assigning a cause, with the discriminator to read',
+     /no scan reply arrived/i.test(status.textContent) && /rxBytes/.test(status.textContent));
+
+  S.resetAll();
+  S.applyPeripherals({ known: true, camera: { state: 'absent', sensor: null } });
   renderPeripherals(S.state);
   ok('an empty bus does not imply the list is complete',
-     /cannot be discovered/i.test(empty.textContent));
+     /cannot be discovered/i.test(empty.textContent) && /\+ add/.test(empty.textContent));
 
-  S.applyPeripherals({ i2c: [0x11] });
+  S.applyScan({ ok: true, bus: 'i2c0', sda: 5, scl: 6, ms: 100, found: [{ addr: 0x11 }], at: 4000 });
   renderPeripherals(S.state);
   ok('an address with no candidate is not given an invented name',
-     /unidentified device/.test(list.innerHTML));
+     /0x11/.test(list.innerHTML) && !/probably/.test(list.innerHTML) && /Nothing in the table/.test(ask.innerHTML));
+  S.resetAll();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -377,6 +432,50 @@ const { mountBelt, renderBelt } = await load('render/belt.js');
   S.state.workOrder = null;
   renderBelt(S.state);
   ok('and clearing it gives the slot back', root.hidden === false);
+}
+
+/* ------------------------------------------------------------------------ */
+/* the Images panel Flash button                                             */
+/* ------------------------------------------------------------------------ */
+
+const { mountFirmware, renderFirmware } = await load('render/firmware.js');
+
+{
+  const root = tree(['fw', 'body'], ['fw', 'empty'], ['fw', 'memory'], ['fw', 'mem-empty']);
+  let asked = null;
+  mountFirmware(root, { onFlash: id => { asked = id; } });
+  const body = find(root, '[data-fw=body]');
+
+  const built = { buildId: 'b1', version: '0.14.1', sha: 'abc1234def', bytes: 880384, builtAt: Date.now(), outcome: 'built' };
+  const failedBuild = { buildId: 'b2', version: '0.14.1', sha: null, bytes: null, builtAt: Date.now(), outcome: 'failed' };
+
+  /* Linked and idle: a built image offers a Flash button; a failed build,
+     with no image behind it, offers none. */
+  renderFirmware({ firmware: [built, failedBuild], device: { link: 'linked' }, ui: { flashing: null } });
+  ok('a built image shows an enabled Flash button',
+     /data-flash="b1"/.test(body.innerHTML) && !/data-flash="b1"[^>]*disabled/.test(body.innerHTML));
+  ok('a failed build offers nothing to flash', !/data-flash="b2"/.test(body.innerHTML));
+
+  /* No board: the button is present but disabled. */
+  renderFirmware({ firmware: [built], device: { link: 'offline' }, ui: { flashing: null } });
+  ok('with no board linked the Flash button is disabled',
+     /data-flash="b1"[^>]*disabled/.test(body.innerHTML));
+
+  /* A flash in flight: other rows are disabled, the one being written says so. */
+  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { flashing: { buildId: 'b1' } } });
+  ok('the row being flashed says so instead of a button',
+     /Flashing/.test(body.innerHTML) && !/data-flash="b1"/.test(body.innerHTML));
+
+  const other = { buildId: 'b3', version: '0.14.1', sha: 'ffff0000', bytes: 880384, builtAt: Date.now(), outcome: 'built' };
+  renderFirmware({ firmware: [other], device: { link: 'linked' }, ui: { flashing: { buildId: 'b1' } } });
+  ok('and every other Flash button is disabled while one runs',
+     /data-flash="b3"[^>]*disabled/.test(body.innerHTML));
+
+  /* The click routes to the handler with the build id. */
+  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { flashing: null } });
+  const btn = { dataset: { flash: 'b1' }, disabled: false, closest(sel) { return sel === '[data-flash]' ? this : null; } };
+  body._listeners.click?.[0]?.({ target: btn });
+  ok('clicking Flash asks to flash that build', asked === 'b1');
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);

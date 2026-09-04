@@ -24,6 +24,9 @@ import {
   state, subscribe, renderAll, applyPeripherals, applyUi,
   applyFirmware, applyWorkOrder, resetAttempts,
 } from './state.js';
+import {
+  applyWiring, applyScan, confirmPart, ignorePart, keepPart, removePart, addPart, restoreWiring, waitForState,
+} from './state.js';
 import { mountStrip } from './strip.js';
 import { mountRail, renderRail } from './render/rail.js';
 import { mountVitals, renderVitals } from './render/vitals.js';
@@ -36,10 +39,11 @@ import { mountAgent, renderWorkOrder, renderAttempts, renderGate } from './rende
 import { mountBelt, renderBelt } from './render/belt.js';
 import { mountFirmware, renderFirmware, renderMemory } from './render/firmware.js';
 import { approvePending, holdPending } from './builder/gate.js';
-import { mountTools, configEffector } from './webmcp.js';
+import { mountTools, configEffector, flashBuild } from './webmcp.js';
 import { fetchManifest } from './link/flash.js';
 import { createBuildClient } from './link/build.js';
 import { clock } from './format.js';
+import { readPref, writePref } from './prefs.js';
 import { Session } from './onboard/session.js';
 import { describeBringUp } from './onboard/guide.js';
 import { webSerialDriver, simulatedDriver } from './link/drivers.js';
@@ -57,7 +61,12 @@ mountCamera($('#camera'));
 /** Set once a transport is attached; the camera offer writes through it. */
 let link = null;
 
-mountFirmware($('#firmware'));
+/* The Flash button on each image row is the same write as the flash_image
+   tool, through the same gate and into the same build log: one code path
+   whether a person or an agent asked. */
+mountFirmware($('#firmware'), {
+  onFlash: buildId => flashBuild(toolFx, buildId, { requestedBy: 'operator' }),
+});
 /* The two buttons answer whatever gate is pending — the loop's, before it
    commits a limit, or a tool's, before it writes to the board. Approve and
    Hold are never tools, which is the whole reason there is a gate. */
@@ -71,25 +80,97 @@ mountAgent($('#agent'), {
 mountBelt($('#belt'));
 
 mountPeripherals($('#vitals'), {
-  onCamera: on => setCamera(on),
-  onCameraDecline: () => applyPeripherals({ cameraAsked: true }),
+  onCamera: on => chooseCamera(on),
+  /* Everything below is a person's: the page asks, the person answers, and
+     no tool can answer for them. */
+  onScan: () => scanBus(),
+  onConfirm: (key, name) => confirmPart(key, name),
+  onIgnore: key => ignorePart(key),
+  onKeep: key => keepPart(key),
+  onRemove: key => removePart(key),
+  onAdd: part => addPart(part),
 });
+$('[data-cam=hide]')?.addEventListener('click', () => chooseCamera(false));
 
 /**
- * Ask the board to start or stop capturing.
+ * Ask the board to start or stop capturing. Nothing else.
  *
- * Recording that the question was answered matters even when there is no
- * transport to carry it: it is what stops the offer reappearing every time the
- * board re-reports what is attached.
+ * This is what a tool calls: an agent that switches the camera on to measure
+ * a frame rate and off again afterwards has expressed no opinion about
+ * whether the person wants to watch, so nothing here touches their choice.
  */
 async function setCamera(on) {
-  /* The intent is recorded separately from the state. A ribbon that comes out
-     and goes back in leaves streaming off through no decision of anybody's,
-     and this is what lets the picture return by itself rather than putting the
-     same question up every time the hardware moves. */
-  applyPeripherals({ cameraAsked: true, streamWanted: on });
   try { await link?.send({ t: 'cam', on }); }
   catch (err) { applyUi({ label: `could not reach the board: ${err.message}` }); }
+}
+
+/**
+ * The person's answer: show the picture, or hide it.
+ *
+ * About the picture only. The stream keeps running while the panel is
+ * hidden, so the frame rate and the frame age go on being measured and an
+ * agent reading them is reading a live camera, not a paused one. Showing
+ * again starts the stream only if something else had stopped it.
+ * Remembered across visits.
+ */
+function chooseCamera(on) {
+  applyUi({ cameraShown: on });
+  writePref('cameraShown', on);
+  if (on && !state.peripherals.streaming) return setCamera(true);
+  return Promise.resolve();
+}
+
+/**
+ * Ask the board what answers on its I2C header, and wait for the answer.
+ *
+ * Bounded, because firmware from before the scan command never answers, and
+ * a page waiting forever for it would show "scanning…" forever. The answer
+ * itself lands through the feed, which is where the wiring list is folded.
+ */
+async function scanBus({ sda, scl } = {}) {
+  if (!link?.open) return { ok: false, error: 'no board is linked' };
+  const before = state.wiring.scan;
+  applyWiring({ scanning: true });
+  const req = { t: 'scan' };
+  if (Number.isInteger(sda)) req.sda = sda;
+  if (Number.isInteger(scl)) req.scl = scl;
+  try { await link.send(req); }
+  catch (err) { applyWiring({ scanning: false }); return { ok: false, error: err.message }; }
+  const answered = await waitForState(s => s.wiring.scan !== before, { timeoutMs: 6000 });
+  if (!answered) {
+    /* Recorded as a failed scan rather than as nothing. A timeout alone does
+       not distinguish old firmware, a request that never arrived, a blocked
+       scan task or a reply that could not be parsed. */
+    applyScan({ ok: false, err: 'no_answer', at: Date.now() });
+    return { ok: false, error: 'no scan_ack arrived within 6 seconds; compare the board rxBytes before and after the request' };
+  }
+  return state.wiring.scan;
+}
+
+/** The board whose wiring memory is loaded, so a change of board reloads. */
+let wiringFor = null;
+
+/**
+ * What a previous visit knew about this board.
+ *
+ * Keyed on the board's own identity rather than on the page, because the
+ * wiring belongs to the board: a second board on the same bench has its own
+ * header and its own answers.
+ */
+function restoreWiringFor(s) {
+  const id = s.device.id;
+  if (!id || id === wiringFor) return;
+  wiringFor = id;
+  restoreWiring(readPref(`wiring.${id}`, {}));
+}
+
+/** Only what a person said is worth remembering; what the board said it will say again. */
+function rememberWiring(s) {
+  if (!wiringFor) return;
+  writePref(`wiring.${wiringFor}`, {
+    parts: s.wiring.parts.filter(p => p.how === 'declared' || p.confirmedBy === 'person'),
+    ignored: s.wiring.ignored,
+  });
 }
 
 /**
@@ -138,6 +219,8 @@ subscribe((s, changed) => {
      nothing. */
   if (changed.has('frame') || changed.has('device') || changed.has('peripherals')) renderCamera(s);
   if (changed.has('peripherals')) { renderPeripherals(s); syncCameraPanel(s); resumeCamera(s); }
+  if (changed.has('wiring')) { renderPeripherals(s); rememberWiring(s); }
+  if (changed.has('device')) restoreWiringFor(s);
   if (changed.has('workOrder')) { renderWorkOrder(s); renderBelt(s); }
   /* Attempts drive the learned-limits list too: what the board has been shown
      to do is read off the attempts rather than stored separately, so there is
@@ -149,14 +232,22 @@ subscribe((s, changed) => {
     renderSource(s);
     if (s.gate?.state === 'pending') announce('Agent waiting for approval.');
   }
-  if (changed.has('firmware')) renderFirmware(s);
-  if (changed.has('ui')) { renderSource(s); renderBelt(s); }
+  /* The image rows also carry the Flash buttons, whose disabled state turns on
+     the link and on whether a flash is in flight — so they repaint when the
+     device or the ui slice moves, not only when the image list does. */
+  if (changed.has('firmware') || changed.has('ui') || changed.has('device')) renderFirmware(s);
+  if (changed.has('ui')) { renderSource(s); renderBelt(s); syncCameraPanel(s); renderPeripherals(s); }
   narrate(s, changed);
 });
 
-/** The camera panel exists only while there is a camera behind it. */
+/**
+ * The camera panel exists while there is a camera behind it and the person
+ * wants the picture. Whether frames are flowing is a different fact, drawn
+ * inside the panel and on the vitals, never by the panel's presence.
+ */
 function syncCameraPanel(s) {
-  document.body.dataset.camera = s.peripherals.camera?.state === 'ok' ? 'on' : 'off';
+  const on = s.peripherals.camera?.state === 'ok' && s.ui.cameraShown !== false;
+  document.body.dataset.camera = on ? 'on' : 'off';
 }
 
 /** Whether the camera was reported present on the previous paint. */
@@ -369,6 +460,13 @@ function goLive(s) {
      gap would otherwise be told the board has no name and no firmware — by a
      page that has known both since the flash decision. */
   if (s.state.hello) feed.handleFrame(s.state.hello);
+
+  /* Once per link: what is on the header. Asked after the identity has been
+     handed over, so what a previous visit knew about this board is in place
+     before the answer lands and only genuinely new addresses raise a
+     question. Firmware without the command never answers; the ask times
+     out quietly. */
+  scanBus().catch(() => {});
 }
 
 /* ------------------------------------------------------------------------ */
@@ -394,8 +492,7 @@ function abandonBuild() {
  * buttons answer. Absent document.modelContext, this registers nothing and
  * the note beside the badge says so, once.
  */
-mountTools({
-  fx: {
+const toolFx = {
     setCamera: on => setCamera(on),
     setConfig,
     flash: async opts => {
@@ -420,12 +517,19 @@ mountTools({
     source: () => (simulated ? 'sim' : 'usb'),
     /* Where bring-up stands, for a caller that cannot see the ladder. */
     bringUp: () => (session ? describeBringUp(session.state) : null),
-  },
-});
+    scan: opts => scanBus(opts),
+};
+mountTools({ fx: toolFx });
 
 /* ------------------------------------------------------------------------ */
 /* go                                                                        */
 /* ------------------------------------------------------------------------ */
+
+/* The picture is wanted on screen unless a previous visit hid it; the stream
+   is wanted whenever there is a camera, so it starts on its own and keeps
+   measuring while the panel is hidden. */
+applyUi({ cameraShown: readPref('cameraShown', true) !== false });
+applyPeripherals({ streamWanted: true });
 
 renderAll();
 startOnboarding();

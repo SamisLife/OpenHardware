@@ -27,7 +27,7 @@
 
 import {
   state,
-  applyDevice, applyFirmware, applyFrame, applyLimits, applyPeripherals, applyUi,
+  applyDevice, applyFirmware, applyFrame, applyLimits, applyPeripherals, applyUi, applyScan,
   pushTelemetry, pushGap,
 } from '../state.js';
 
@@ -98,6 +98,9 @@ export function createFeed({
       case 'img': return beginImage(frame);
       case 'imgd': return addChunk(frame);
       case 'status': return onStatus(frame);
+      /* What answered on the header. Folded into the wiring list by the
+         model, which is where the questions for a person come from. */
+      case 'scan_ack': return applyScan({ ...frame, at: Date.now() });
       case 'log': return onLog?.({ src: frame.src || null, msg: frame.msg || '' });
       default: return;
     }
@@ -131,6 +134,9 @@ export function createFeed({
       app: h.app && typeof h.app === 'object'
         ? { name: h.app.name || null, ver: h.app.ver || null } : null,
       appState: h.app?.state || null,
+      /* This is the discriminator between a request that never reached the
+         board and one whose handler failed later. Zero is a real observation. */
+      rxBytes: Number.isFinite(h.rx) ? h.rx : null,
       bootId,
       reset: h.reset || null,
       /* The bootloader's view of the running image, and any slot it gave up
@@ -257,7 +263,6 @@ export function createFeed({
     const patch = {
       known: true,
       camera: cam,
-      i2c: Array.isArray(frame.i2c) ? frame.i2c : [],
       streaming: !!frame.streaming,
       /* Advertised, never assumed. A board that says nothing about cfg does
          not support it, and a tool asking for a config it cannot apply is told
@@ -265,9 +270,6 @@ export function createFeed({
       cfg: frame.cfg === true,
       config: readConfig(frame.config),
     };
-    /* A sensor that has just arrived is a new question for the operator, and
-       the answer on file was about a different module. */
-    if (isOk && !wasOk) patch.cameraAsked = false;
     applyPeripherals(patch);
     armFrameWatch(patch.streaming && isOk);
 

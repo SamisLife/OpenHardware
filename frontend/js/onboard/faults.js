@@ -271,11 +271,37 @@ export const FAULTS = {
     observed: 'The board came back on a different image than the one just activated. '
             + 'The bootloader abandoned the candidate slot and booted the previous image.',
     causes: [
-      'the candidate reset before its harness could confirm the image',
+      'the candidate reset or the serial port was reopened before its harness could confirm the image',
       'the candidate was built before the harness confirmed itself at boot',
     ],
-    next: 'Read the reset reason and the wire log, fix what the candidate did at boot, '
-        + 'build again, and flash the new build.',
+    next: 'Use the reset reason and wire log to distinguish a candidate panic from an '
+        + 'early serial reopen before changing the candidate app.',
+  },
+
+  no_activate_ack: {
+    observed: 'The candidate bytes were written, but the running harness did not acknowledge '
+            + 'the command that selects their OTA slot.',
+    causes: [
+      'a byte reached the board while it was still booting, before its USB driver existed, '
+      + 'and has blocked its inbound FIFO since: the receive count stays at zero however '
+      + 'much is sent, until the next flash empties it (a harness from before 0.14.1 cannot '
+      + 'clear this itself)',
+      'the frame arrived incomplete or failed its protocol check',
+    ],
+    next: 'The candidate was not assumed active. A receive count that never moves is the '
+        + 'blocked FIFO: restore the current baseline, which drains it at boot, then flash '
+        + 'the candidate again. A count that moved with no acknowledgement is a rejected frame; '
+        + 'the wire log shows which.',
+  },
+
+  activation_refused: {
+    observed: 'The running harness received the activation command and explicitly refused it.',
+    causes: [
+      'the target slot did not contain a valid ESP-IDF application image',
+      'the ELF identity in the slot did not match the immutable build manifest',
+      'ESP-IDF could not update OTA selection metadata',
+    ],
+    next: 'Use the harness error shown below; unlike a timeout, it names the failed validation.',
   },
 
   link_dropped: {

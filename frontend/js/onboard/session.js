@@ -77,11 +77,23 @@ const RUNG_TITLE = {
  */
 const PROV_ACK_MS = 1600;
 const PROV_TRIES = 3;
+/** Activation is idempotent until its restart, and must be acknowledged. */
+const ACTIVATE_ACK_MS = 1600;
+const ACTIVATE_TRIES = 3;
 /** And how long to watch the join itself before saying what happened. */
 const JOIN_MS = 20000;
 
 /** How long to wait for a board to announce itself before giving up on it. */
 const HELLO_MS = 4000;
+/**
+ * How long a freshly activated image is left completely alone after restart.
+ * Opening the port resets this board, and the USB peripheral can be back on
+ * the bus while the bootloader is still running — before the new
+ * image has had a chance to confirm itself. Opened then, the reset lands on
+ * an unconfirmed image and the bootloader puts the previous one back. The
+ * harness confirms within its first second; this is that second, with room.
+ */
+const CONFIRM_GRACE_MS = 4000;
 /** And for the first telemetry after it has. */
 const BEAT_MS = 6000;
 /** How long "listen anyway" waits. Long, because reading the wire is the point. */
@@ -614,18 +626,51 @@ export class Session {
     const current = await helloWait;
     if (!current) return this.fail('boot', 'no_hello', 'the current image did not return to activate the candidate');
 
-    const ackWait = this.awaitFrame('activate_ack', 5000);
-    const accepted = await this.link?.send({
-      t: 'activate', slot: activation.slot, sha: activation.sha,
-    });
-    if (!accepted) return this.fail('boot', 'link_dropped', 'the activation request did not reach the board');
-    const ack = await ackWait;
-    if (!ack?.ok) return this.fail('boot', 'flash_failed', ack?.err || 'the candidate image was not accepted');
+    /* A successful stream write is not proof that the USB OUT endpoint
+       delivered the frame. Other acknowledged commands already retry for
+       this reason; selecting an image must be at least as strict. The command
+       is idempotent until its scheduled restart. If the link closes before
+       the acknowledgement, continue to the boot verdict: that close may be
+       the accepted command restarting the board. */
+    const rxBefore = Number(current.rx);
+    let ack = null;
+    let sent = 0;
+    for (let attempt = 1; attempt <= ACTIVATE_TRIES; attempt++) {
+      const ackWait = this.awaitFrame('activate_ack', ACTIVATE_ACK_MS);
+      this.log(`> activate ${activation.slot} · attempt ${attempt}`, 'frame');
+      const accepted = await this.link?.send({
+        t: 'activate', slot: activation.slot, sha: activation.sha,
+      });
+      if (accepted) sent++;
+      ack = await ackWait;
+      if (ack || !this.link?.open) break;
+    }
 
-    this.log(`< activate_ack ${ack.slot} ${ack.sha || ''}`, 'frame');
+    if (ack && !ack.ok) {
+      return this.fail('boot', 'activation_refused', ack.err || 'the candidate image was not accepted');
+    }
+    if (!ack && this.link?.open) {
+      const rxAfter = Number(this.state.hello?.rx);
+      const rxDetail = Number.isFinite(rxBefore) && Number.isFinite(rxAfter)
+        ? `; board rx changed from ${rxBefore} to ${rxAfter}` : '';
+      return this.fail('boot', 'no_activate_ack',
+                       `${sent} activation frame${sent === 1 ? '' : 's'} queued${rxDetail}`);
+    }
+
+    if (ack) this.log(`< activate_ack ${ack.slot} ${ack.sha || ''}`, 'frame');
+    else this.log('activation link reset before its acknowledgement; reading the boot verdict', 'meta');
     this.rung('boot', 'active', `${activation.slot} selected; waiting for candidate boot`);
     await sleep(400);
     await this.closeLink();
+
+    /* Leave the candidate alone before even looking for its port. The native
+       USB driver used below actively opens the port to release it after an
+       esptool reset. That is needed after writing, but here it would reset a
+       pending candidate before app_main can mark it valid. */
+    for (let left = CONFIRM_GRACE_MS; left > 0; left -= 500) {
+      this.rung('boot', 'active', `${activation.slot} booting · ${Math.ceil(left / 1000)}s for it to confirm itself`);
+      await sleep(Math.min(500, left));
+    }
 
     const port = await this.driver.waitForBoard(this.port, {
       onWait: (_n, remaining) =>
@@ -633,6 +678,7 @@ export class Session {
     });
     if (!port) return this.fail('boot', 'no_reopen');
     this.port = port;
+
     if (!(await this.openLink())) return this.fail('boot', 'no_open', this._openError);
 
     /* The port just reopened, which resets this board, and that reset is the
@@ -1136,7 +1182,7 @@ export class Session {
              rediscovered whatever is attached to it. What the previous boot
              said is dropped and the question asked again, rather than carried
              forward as though it were still current. */
-          applyPeripherals({ known: false, streaming: false, cameraAsked: false });
+          applyPeripherals({ known: false, streaming: false });
           this.link.send({ t: 'caps' }).catch(() => {});
 
           this.log('serial link re-established', 'meta');
