@@ -369,6 +369,22 @@ export function mountStrip(el, { read } = {}) {
       ctx.fillText(`LIMIT ${num(ceiling, 0)}`, px + 6, ly - 4);
     }
 
+    /* ---- from here it is data, and data stays on the paper --------------
+       The vertical scale already clamps a reading into its lane. The
+       horizontal one cannot clamp without lying — piling every old sample
+       against the left edge would draw a wall that was never measured — so
+       the pen is clipped instead. It matters because the ring is sized in
+       samples and the window in seconds: a board reporting more slowly than
+       the ring assumes holds more than a window of them, and the surplus maps
+       to an x left of the plot, where the pen draws straight across the
+       lane's own name and reading. A few pixels of slack on the right so the
+       parked carriage, which sits just past the last sample, is not cut in
+       half by its own edge. */
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, pw + 8, ph);
+    ctx.clip();
+
     for (const run of runs) {
       if (!run.length) continue;
 
@@ -420,10 +436,35 @@ export function mountStrip(el, { read } = {}) {
       ctx.fill();
     }
 
+    ctx.restore();
+
+    /* ---- the gutter -----------------------------------------------------
+       Three things share this strip of paper: the lane's name, its current
+       value, and the scale mark for the trace. They are measured against each
+       other rather than each drawn as though it had the whole width, because
+       a lane whose name is as long as an application metric chooses to make
+       it — `APP oled_ok` — ran straight into the scale number and the two
+       printed on top of each other. Whatever does not fit is shortened here,
+       where the shortening is visible, rather than by overprinting. */
+    const hiText = String(Math.round(hi));
+    const loText = String(Math.round(lo));
+
+    let scaleW = 0;
+    if (!narrow) {
+      ctx.font = '9px "IBM Plex Mono", ui-monospace, monospace';
+      scaleW = Math.max(
+        ctx.measureText(hiText).width,
+        isLast ? ctx.measureText(loText).width : 0,
+      );
+    }
+    /* 10 left margin, then the name, then clear air, then the scale mark
+       sitting 6 px off the plot edge. */
+    const nameRoom = gutter - 10 - (scaleW ? scaleW + 14 : 6);
+
     ctx.textAlign = 'left';
     ctx.fillStyle = INK_LABEL;
     ctx.font = '9px "IBM Plex Sans Condensed", system-ui, sans-serif';
-    ctx.fillText(spaced(lane.label), 10, py + 13);
+    ctx.fillText(ellipsize(lane.label, nameRoom), 10, py + 13);
 
     const shown = last ? last[lane.id] * scale : NaN;
     ctx.fillStyle = last
@@ -431,8 +472,17 @@ export function mountStrip(el, { read } = {}) {
           ? INFERNO_LUT[inkBucket(shown, lo, hi)]
           : INK_VALUE)
       : INK_DIM;
-    ctx.font = `${narrow ? 15 : 18}px "IBM Plex Mono", ui-monospace, monospace`;
+
+    /* The reading is the one thing here that may not be abbreviated, so when
+       it is too wide for the gutter it is set smaller instead. An app metric
+       reporting six digits is the case that finds this. */
     const text = num(shown, lane.decimals);
+    const unitW = narrow || !lane.unit ? 0 : 22;
+    let size = narrow ? 15 : 18;
+    for (; size > 10; size--) {
+      ctx.font = `${size}px "IBM Plex Mono", ui-monospace, monospace`;
+      if (ctx.measureText(text).width + unitW <= gutter - 14) break;
+    }
     ctx.fillText(text, 10, py + (narrow ? 31 : 34));
 
     if (!narrow) {
@@ -447,10 +497,27 @@ export function mountStrip(el, { read } = {}) {
       ctx.textAlign = 'right';
       ctx.fillStyle = INK_SCALE;
       ctx.font = '9px "IBM Plex Mono", ui-monospace, monospace';
-      ctx.fillText(String(Math.round(hi)), px - 6, py + 10);
-      if (isLast) ctx.fillText(String(Math.round(lo)), px - 6, py + ph - 3);
+      ctx.fillText(hiText, px - 6, py + 10);
+      if (isLast) ctx.fillText(loText, px - 6, py + ph - 3);
       ctx.textAlign = 'left';
     }
+  }
+
+  /**
+   * A lane name, letter-spaced, shortened until it fits the room it has.
+   *
+   * The raw name is cut before the spacing is applied, so the result is a
+   * shorter name rather than a name with the gaps squeezed out of it. The
+   * caller has already set the font.
+   */
+  function ellipsize(raw, room) {
+    const full = spaced(raw);
+    if (room <= 0 || ctx.measureText(full).width <= room) return full;
+    for (let n = String(raw).length - 1; n > 0; n--) {
+      const cut = `${spaced(String(raw).slice(0, n))}…`;
+      if (ctx.measureText(cut).width <= room) return cut;
+    }
+    return '…';
   }
 
   /**
@@ -497,10 +564,22 @@ export function mountStrip(el, { read } = {}) {
 
   /**
    * Blank paper is only legible as loss once it is annotated. Every gap gets a
-   * hairline where it began, a hatched band, and the label naming what was
-   * observed.
+   * hairline where it began, a hatched band, and — where there is room for it
+   * — the label naming what was observed.
+   *
+   * The bands are drawn for every gap. The LABELS are rationed, because they
+   * cannot be. A board that reboots three times in twenty seconds produces
+   * three gaps a few pixels apart, and three labels a few pixels apart print
+   * on top of one another and read as one long unintelligible word. So the
+   * labels are laid out in a second pass, left to right, and one that would
+   * land on top of the last is not drawn: its band and hairline still mark
+   * the event, which is the part that carries the measurement. Consecutive
+   * gaps that say the same thing are counted into one label instead, so three
+   * reboots read as one REBOOT ×3 rather than as nothing.
    */
   function drawGaps(buffer, xOf, px, pw, ph, now) {
+    const marks = [];
+
     for (let i = 0; i < buffer.length; i++) {
       if (!buffer[i].gap) continue;
 
@@ -544,11 +623,52 @@ export function mountStrip(el, { read } = {}) {
          wide, and suppressing the annotation there would hide the very event
          it exists to name. */
       if (band > 14 && buffer[i].label) {
-        ctx.fillStyle = `rgba(${AMBER},0.85)`;
-        ctx.font = '9px "IBM Plex Sans Condensed", system-ui, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText(spaced(buffer[i].label), x1 + 5, 12);
+        marks.push({ x: x1 + 5, label: String(buffer[i].label) });
       }
+    }
+
+    if (!marks.length) return;
+
+    ctx.fillStyle = `rgba(${AMBER},0.85)`;
+    ctx.font = '9px "IBM Plex Sans Condensed", system-ui, sans-serif';
+    ctx.textAlign = 'left';
+
+    const right = px + pw;
+    let taken = -Infinity;
+
+    for (let m = 0; m < marks.length; m++) {
+      const mark = marks[m];
+      if (mark.x < taken) continue;
+
+      /* Gaps that follow closely and say the same thing are counted rather
+         than repeated. The chain runs from each absorbed gap to the next, not
+         from the first, so a burst of reboots reads as one annotation however
+         long the burst runs — while two reboots a minute apart stay two
+         separate events, which is what they are. */
+      let text = spaced(mark.label);
+      let width = ctx.measureText(text).width;
+      let repeats = 1;
+      let chain = mark.x;
+      while (m + repeats < marks.length
+             && marks[m + repeats].label === mark.label
+             && marks[m + repeats].x < chain + width + 8) {
+        chain = marks[m + repeats].x;
+        repeats++;
+      }
+      if (repeats > 1) {
+        text = `${spaced(mark.label)} ×${repeats}`;
+        width = ctx.measureText(text).width;
+      }
+
+      /* A label that would run off the paper is pulled back onto it, and one
+         that still cannot fit is dropped: the band has already said an
+         outage happened here. */
+      const x = Math.min(mark.x, right - width - 2);
+      if (x >= px) {
+        ctx.fillText(text, x, 12);
+        taken = x + width + 8;
+      }
+      m += repeats - 1;
     }
   }
 

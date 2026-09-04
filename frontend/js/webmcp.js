@@ -26,7 +26,7 @@
    honesty the badge keeps for the human has to reach the model too. A summary
    of simulated telemetry is not a measurement, and the reply says so.
 
-   Approve and Hold are never tools. flash_image and provision_wifi ask
+   Approve and Hold are never tools. flash_image and restore_baseline ask
    through the page's single gate and wait for a person. An agent
    that could approve its own gate has no gate.
 
@@ -48,7 +48,7 @@ import { requestGate } from './builder/gate.js';
 
 /** The telemetry contract, as the fields a summary is computed over. */
 const FIELDS = [
-  'uptimeS', 'tempC', 'heapFree', 'psramFree', 'psramLargestBlock', 'rssi', 'cpuMhz', 'fps',
+  'uptimeS', 'tempC', 'heapFree', 'psramFree', 'psramLargestBlock', 'cpuMhz', 'fps',
 ];
 
 /** How long after the last call an agent is considered to have gone quiet. */
@@ -257,7 +257,7 @@ function readTools(fx) {
         return {
           ok: true,
           device: {
-            id: d.id, board: d.board, mcu: d.mcu, mac: d.mac, ip: d.ip, ssid: d.ssid,
+            id: d.id, board: d.board, mcu: d.mcu, mac: d.mac,
             harness: { ...d.firmware },
             firmware: { ...d.firmware },
             app: d.app, appState: d.appState, appLoops: d.appLoops,
@@ -478,7 +478,7 @@ function readTools(fx) {
         'Telemetry over the last windowMs, summarised: per field the sample count, min, max, '
         + 'mean and slope in units per second. Fields: uptimeS, tempC (die °C), heapFree and '
         + 'psramFree (bytes), psramLargestBlock (largest CONTIGUOUS free PSRAM, bytes — the '
-        + 'number that decides whether a framebuffer fits), rssi (dBm, absent with no radio), '
+        + 'number that decides whether a framebuffer fits), '
         + 'cpuMhz, fps (measured frame rate, only while the camera streams), plus every finite '
         + 'application metric as app.<key>. A field is null '
         + 'when nothing was measured. `gaps` counts breaks in the record inside the window. '
@@ -942,39 +942,6 @@ function writeTools(fx) {
       },
     },
 
-    {
-      name: 'provision_wifi',
-      title: 'Store Wi-Fi credentials; asks a human first',
-      description:
-        'Store Wi-Fi credentials on the board and have it join. ASKS A HUMAN FIRST — blocks '
-        + 'until Approve, refused on Hold. The radio is 2.4 GHz only. The reply is what the '
-        + 'board read back from its own storage, never the passphrase. Telemetry over the cable '
-        + 'is unaffected either way.'
-        + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
-      inputSchema: {
-        type: 'object', required: ['ssid'],
-        properties: {
-          ssid: { type: 'string', minLength: 1, maxLength: 32 },
-          psk: { type: 'string', maxLength: 64, default: '' },
-        },
-        additionalProperties: false,
-      },
-      execute: async (input, { signal } = {}) => {
-        if (!linked()) return notLinked(fx);
-        const ssid = String(input?.ssid || '').trim();
-        if (!ssid) return { ok: false, error: 'ssid is required' };
-        return gated(fx, {
-          action: `Store credentials for "${ssid}" on the board and join it`,
-          rationale: 'An agent asked to put this board on a network. Credentials outlive the '
-                   + 'session and the board will try to join on every boot. It does not happen '
-                   + 'without you.',
-          signal,
-        }, async () => {
-          await fx.provision(ssid, String(input?.psk || ''));
-          return { ok: true, network: state.device.ssid, ip: state.device.ip };
-        });
-      },
-    },
   ];
 }
 
@@ -1319,7 +1286,7 @@ function seen(input) {
  * Register the toolbelt, and keep it honest about what is attached.
  *
  * @param {object} opts
- *   fx            effectors: setCamera, setConfig, flash, provision,
+ *   fx            effectors: setCamera, setConfig, flash,
  *                 manifest, build, wireTail, source
  *   modelContext  the registry; defaults to document.modelContext, then to
  *                 navigator.modelContext

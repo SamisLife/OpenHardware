@@ -145,10 +145,6 @@ export function createFeed({
       aborted: h.aborted || null,
       reboots: state.device.reboots + (bootId && previousBoot && bootId !== previousBoot ? 1 : 0),
     };
-    /* Only what the frame carried. A hello that says nothing about the network
-       must not blank an address another transport reported. */
-    if ('ssid' in h) patch.ssid = h.ssid || null;
-    if ('ip' in h) patch.ip = h.ip || null;
     applyDevice(patch);
 
     /* Board constants arrive here and nowhere else — the panels refuse to draw
@@ -159,21 +155,43 @@ export function createFeed({
     if (Number.isFinite(h.temp_crit_c)) limits.tempCritC = h.temp_crit_c;
     if (Object.keys(limits).length) applyLimits(limits);
 
+    /* ---- which build the board is actually running ----------------------
+       ACTIVE is a claim about the board, so it is decided by the board, on
+       every identity frame, against the hash it reports. It used to be
+       decided only at the moment a build first matched, which meant nothing
+       ever took the label away again: restore the baseline or lose a
+       candidate to a rollback, and the row that had been active went on
+       saying ACTIVE over a board that had not been running it for hours.
+
+       A build that has never been on the board stays BUILT. Only one that
+       WAS active and no longer matches is demoted, because "this was on the
+       board and something replaced it" is a different fact from "this was
+       compiled and never written". Outcomes that record how an attempt ended
+       — failed, rolled back, held — are left alone: they describe an event,
+       not what the board holds now.
+
+       Nothing is concluded from a board that does not say what it is
+       running. An absent hash is no evidence either way, and demoting on it
+       would invent a change of image out of a malformed frame. */
     const runningSha = String(h.sha || '').toLowerCase();
-    const activating = runningSha && state.firmware.some(row =>
-      row.outcome === 'built' && String(row.sha || '').toLowerCase() === runningSha);
-    if (activating) {
-      applyFirmware(state.firmware.map(row => {
-        const outcome = row.outcome;
+    if (runningSha) {
+      let changed = false;
+      const next = state.firmware.map(row => {
         const same = String(row.sha || '').toLowerCase() === runningSha;
-        if (same && ['built', 'active', 'superseded'].includes(outcome)) {
-          return { ...row, outcome: 'active', slot: h.slot || row.slot || null };
+        const slot = h.slot || row.slot || null;
+
+        if (same && ['built', 'active', 'superseded'].includes(row.outcome)) {
+          if (row.outcome === 'active' && row.slot === slot) return row;
+          changed = true;
+          return { ...row, outcome: 'active', slot };
         }
-        if (!same && ['built', 'active'].includes(outcome)) {
+        if (!same && row.outcome === 'active') {
+          changed = true;
           return { ...row, outcome: 'superseded' };
         }
         return row;
-      }));
+      });
+      if (changed) applyFirmware(next);
     }
 
     kick();
@@ -208,7 +226,6 @@ export function createFeed({
       heapFree: num(b.heap_free),
       psramFree: num(b.psram_free),
       psramLargestBlock: num(b.psram_largest),
-      rssi: num(b.rssi),
       cpuMhz: num(b.cpu_mhz),
       fps: num(b.fps),
     };

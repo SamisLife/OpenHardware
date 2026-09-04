@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import time
 import sys
 import tempfile
 
@@ -68,7 +69,23 @@ def publish(temp: Path, dest: Path) -> None:
     shutil.copytree(temp, fresh)
     if dest.exists():
         dest.rename(stale)
-    fresh.rename(dest)
+
+    # The gap between those two renames is the one moment there is no
+    # baseline, and a synced folder can hold the directory long enough to
+    # lose the race — observed on OneDrive, which left the tree with no
+    # baseline at all and the docstring above telling a comfortable lie.
+    # Retried, and put back the way it was if it will not go in.
+    for attempt in range(5):
+        try:
+            fresh.rename(dest)
+            break
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.4)
+                continue
+            if stale.exists() and not dest.exists():
+                stale.rename(dest)
+            raise
     if stale.exists():
         try:
             remove_tree(stale)

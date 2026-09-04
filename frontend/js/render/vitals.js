@@ -24,7 +24,6 @@ const SPEC = [
   { id: 'temp',  label: 'DIE TEMP',   unit: '°C' },
   { id: 'heap',  label: 'HEAP FREE',  unit: 'KB', bar: true },
   { id: 'psram', label: 'PSRAM FREE', unit: 'MB', bar: true },
-  { id: 'rssi',  label: 'WI-FI RSSI', unit: 'dBm' },
   { id: 'clk',   label: 'CPU CLOCK',  unit: 'MHz' },
   { id: 'up',    label: 'UPTIME',     unit: '' },
   { id: 'age',   label: 'FRAME AGE',  unit: '' },
@@ -129,12 +128,6 @@ export function renderVitals(state) {
      A cable-tethered board has no radio association and reports nothing for
      it. Zero dBm is not a weak signal, it is the absence of one, and showing
      it as a reading would be a fabricated number. */
-  const hasRadio = Number.isFinite(t.rssi) && t.rssi < 0;
-  put('rssi', hasRadio ? num(t.rssi, 0) : NIL);
-  note('rssi', hasRadio
-    ? (t.rssi > -70 ? 'good' : t.rssi > -80 ? 'marginal' : 'weak')
-    : 'no association');
-  cells.rssi.root.classList.toggle('is-absent', !hasRadio);
 
   /* The clock is reported, not judged. Calling a value "reduced" needs a
      nominal to compare against, and no board here has declared one. */

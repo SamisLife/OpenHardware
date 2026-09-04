@@ -22,9 +22,7 @@
 
 static const char *TAG = "hw_prov";
 
-#define KEY_SSID   "ssid"
 #define KEY_PSK    "psk"
-#define KEY_SERVER "server"
 #define KEY_CAM    "cam_tries"
 #define KEY_APP    "app_tries"
 
@@ -43,65 +41,6 @@ esp_err_t hw_prov_init(void)
     return err;
 }
 
-static void read_str(nvs_handle_t h, const char *key, char *out, size_t cap)
-{
-    size_t len = cap;
-    out[0] = '\0';
-    if (nvs_get_str(h, key, out, &len) != ESP_OK) out[0] = '\0';
-}
-
-void hw_prov_load(hw_creds_t *out)
-{
-    memset(out, 0, sizeof(*out));
-
-    nvs_handle_t h;
-    /* A namespace that does not exist yet is the ordinary state of a new
-       board, not an error. */
-    if (nvs_open(HW_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-
-    read_str(h, KEY_SSID, out->ssid, sizeof(out->ssid));
-    read_str(h, KEY_PSK, out->psk, sizeof(out->psk));
-    read_str(h, KEY_SERVER, out->server, sizeof(out->server));
-    nvs_close(h);
-
-    out->have_wifi = out->ssid[0] != '\0';
-}
-
-/**
- * Store network credentials.
- *
- * Each write is checked on its own rather than being folded together with a
- * bitwise or. Or-ing error codes produces a value that is reliably non-zero on
- * failure and is not any actual error — so whatever gets reported back to a
- * person is a code that never occurred, which is worse than saying nothing.
- */
-esp_err_t hw_prov_save_wifi(const char *ssid, const char *psk, const char *server)
-{
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(HW_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) return err;
-
-    err = nvs_set_str(h, KEY_SSID, ssid ? ssid : "");
-    if (err == ESP_OK) err = nvs_set_str(h, KEY_PSK, psk ? psk : "");
-    if (err == ESP_OK) err = nvs_set_str(h, KEY_SERVER, server ? server : "");
-    if (err == ESP_OK) err = nvs_commit(h);
-
-    nvs_close(h);
-    return err;
-}
-
-esp_err_t hw_prov_erase(void)
-{
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(HW_NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) return err;
-
-    err = nvs_erase_all(h);
-    if (err == ESP_OK) err = nvs_commit(h);
-
-    nvs_close(h);
-    return err;
-}
 
 /* ------------------------------------------------------------------------ */
 /* the camera probe counter                                                  */

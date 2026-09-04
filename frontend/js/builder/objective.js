@@ -63,7 +63,7 @@ const UNMEASURED = [
   [/\b(?:no|without|zero)\s+(?:dropped|dropping|lost|skipped)\s+frames?/i,
    'no dropped frames', 'the harness reports a frame rate, not a drop count'],
   [/\bwi-?fi\b|\bover\s+the\s+air\b|\bota\b|\bunplugg?ed\b/i,
-   'over Wi-Fi', 'the loop runs over the cable; the radio is unproven — NOTES §6a'],
+   'over Wi-Fi', 'this board has no radio: the harness is built without one and reports over the cable'],
   [/\b(?:low|minimum|least)\s+(?:power|current|draw)\b/i,
    'low power', 'this board reports no current measurement'],
   [/\bnight|\bdark|\blow[- ]light\b/i,

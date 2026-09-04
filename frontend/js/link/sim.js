@@ -33,8 +33,6 @@
        nocam    no camera attached, so the panel has to disappear
        green    the camera returns a uniform green field — an unwritten
                 framebuffer, the failure a compiler cannot catch
-       badwifi  accepts credentials and never associates, so the retry and the
-                backoff can be watched instead of imagined
    ========================================================================== */
 
 import { encodeFrame, FrameReader, IMG_CHUNK_RAW } from './protocol.js';
@@ -98,13 +96,6 @@ export class SimBoard {
 
     this.hasCamera = this.scene !== 'nocam';
 
-    /* Nothing is provisioned until something provisions it, exactly as on a
-       board fresh out of the flasher. */
-    this.net = 'offline';
-    this.ssid = '';
-    this.ip = null;
-    this.rssi = null;
-    this.retryMs = 1000;
     this.cameraUp = false;
 
     /* The configuration the camera is running. Changeable at runtime through
@@ -196,11 +187,7 @@ export class SimBoard {
       temp_crit_c: 85,
       heap: 190000,
       temp_c: round(this.tempC, 1),
-      provisioned: !!this.ssid,
-      ssid: this.ssid,
-      net: this.net,
       app: { ...this.app, state: 'running' },
-      ...(this.ip === null ? {} : { ip: this.ip }),
     });
   }
 
@@ -219,7 +206,6 @@ export class SimBoard {
       } : {}),
       boot_id: this.bootId,
       cam: this.cameraUp ? 'ok' : this.hasCamera ? 'untried' : 'absent',
-      net: this.net,
       app: {
         state: 'running',
         loops: Math.floor(age * 10),
@@ -229,7 +215,6 @@ export class SimBoard {
          simulator held to a weaker contract stops being evidence. Zero dBm is
          an extraordinarily strong signal, so a panel fed zero for an
          unassociated board draws full bars. */
-      ...(this.rssi === null ? {} : { rssi: this.rssi }),
     });
   }
 
@@ -316,63 +301,8 @@ export class SimBoard {
       this.streaming = on;
       return this.emit({ t: 'cam_ack', on });
     }
-    if (obj.t === 'prov') return this.provision(obj);
     if (obj.t === 'cfg') return this.configure(obj);
     if (obj.t === 'scan') return this.scan(obj);
-  }
-
-  /**
-   * Store credentials and try to join, the way the harness does.
-   *
-   * The acknowledgement quotes what was stored rather than what was sent, and
-   * never quotes the passphrase — `has_psk` is the part the other end does not
-   * already know. Matching the firmware here is the whole point of the
-   * simulator: an ack shaped differently would let the page pass against this
-   * board and fail against a real one.
-   */
-  provision(obj) {
-    const ssid = typeof obj.ssid === 'string' ? obj.ssid.trim() : '';
-    if (!ssid) {
-      return this.emit({ t: 'prov_ack', ok: false, err: 'no ssid' });
-    }
-
-    this.ssid = ssid;
-    this.emit({
-      t: 'prov_ack', ok: true, err: '',
-      ssid, server: typeof obj.server === 'string' ? obj.server : '',
-      has_psk: !!obj.psk,
-    });
-
-    this.net = 'joining';
-    this.retryMs = 1000;
-    this.sendStatus('wifi_join', ssid);
-
-    if (this.scene === 'badwifi') return this.after(900, () => this.wifiFail());
-
-    this.after(1400, () => {
-      this.net = 'online';
-      this.ip = '192.168.1.' + (40 + (ssid.length % 60));
-      this.rssi = -52;
-      this.sendStatus('wifi_ok', ssid, { ip: this.ip });
-      this.sendHello();
-    });
-  }
-
-  /** Never gives up, exactly as the firmware never does. */
-  wifiFail() {
-    this.net = 'retrying';
-    this.ip = null;
-    this.rssi = null;
-    this.sendStatus('wifi_fail', 'the access point rejected the password', {
-      reason: 15, retry_ms: this.retryMs,
-    });
-    const wait = this.retryMs;
-    this.retryMs = Math.min(this.retryMs * 2, 30000);
-    this.after(wait, () => {
-      this.net = 'joining';
-      this.sendStatus('wifi_join', this.ssid);
-      this.after(700, () => this.wifiFail());
-    });
   }
 
   /* ---- the model ------------------------------------------------------- */

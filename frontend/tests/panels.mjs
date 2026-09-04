@@ -121,9 +121,6 @@ const MB = 1024 * 1024;
      F.uptime(93158));
   ok('uptime under a day does not', F.uptime(3661) === '01:01:01', F.uptime(3661));
 
-  ok('signal bands are not linear',
-     F.rssiBars(-55) === 4 && F.rssiBars(-67) === 2 && F.rssiBars(-95) === 0);
-  ok('and an absent RSSI is no bars, not full bars', F.rssiBars(null) === 0);
 
   /* A future timestamp is a clock disagreement, not a fresh frame. */
   ok('a frame from the future is not reported as brand new',
@@ -138,9 +135,9 @@ const { mountRail, renderRail } = await load('render/rail.js');
 
 {
   const root = tree(
-    ['rail', 'id'], ['rail', 'board'], ['rail', 'net'], ['rail', 'fw'],
+    ['rail', 'id'], ['rail', 'board'], ['rail', 'fw'],
     ['rail', 'sha'], ['rail', 'slot'], ['rail', 'link'], ['rail', 'link-text'],
-    ['rail', 'bars'], ['rail', 'uptime']);
+    ['rail', 'uptime']);
   mountRail(root);
 
   S.resetAll();
@@ -148,32 +145,20 @@ const { mountRail, renderRail } = await load('render/rail.js');
   const get = v => find(root, `[data-rail=${v}]`);
 
   ok('an unreported device reads as absent everywhere',
-     [get('id'), get('board'), get('net'), get('fw'), get('slot'), get('uptime')]
+     [get('id'), get('board'), get('fw'), get('slot'), get('uptime')]
        .every(n => n.textContent === NIL));
   ok('and the lamp says offline rather than nothing',
      get('link').dataset.state === 'offline' && get('link-text').textContent === 'OFFLINE');
-  ok('with no signal bars', get('bars').dataset.bars === '0');
 
   S.applyDevice({ id: 'board-01', board: 'a board', link: 'linked',
                   firmware: { version: '0.4.0', sha: 'abcdef1234', slot: 'factory' } });
-  S.pushTelemetry({ t: Date.now(), uptimeS: 3661, rssi: -57 });
+  S.pushTelemetry({ t: Date.now(), uptimeS: 3661 });
   renderRail(S.state);
 
   ok('a reported identity is shown', get('id').textContent === 'board-01');
   ok('the firmware hash is truncated, not invented',
      get('sha').textContent === 'abcdef1', get('sha').textContent);
   ok('uptime comes from the sample', get('uptime').textContent === '01:01:01');
-  ok('signal bars follow the reading', get('bars').dataset.bars === '3');
-
-  /* An SSID with no address is an association that has not produced a route,
-     which is a different state from being on a network. */
-  S.applyDevice({ ssid: 'bench', ip: null });
-  renderRail(S.state);
-  ok('an SSID without an address does not claim a network',
-     get('net').textContent === 'bench', get('net').textContent);
-  S.applyDevice({ ip: '10.0.0.4' });
-  renderRail(S.state);
-  ok('and both together read as one', get('net').textContent === 'bench · 10.0.0.4');
 }
 
 /* ------------------------------------------------------------------------ */
@@ -192,7 +177,7 @@ const { mountVitals, renderVitals } = await load('render/vitals.js');
   S.applyDevice({ link: 'linked' });
   S.pushTelemetry({
     t: Date.now(), uptimeS: 120, tempC: 44.2, heapFree: 190000,
-    psramFree: 6.1 * MB, rssi: -57, cpuMhz: 240, fps: 8.3,
+    psramFree: 6.1 * MB, cpuMhz: 240, fps: 8.3,
   });
   renderVitals(S.state);
   ok('a reported temperature is shown', valueOf(0) === '44.2', valueOf(0));
@@ -235,21 +220,6 @@ const { mountVitals, renderVitals } = await load('render/vitals.js');
      heap.children[2].children[0].style.width);
 }
 
-{
-  const root = tree(['vitals', 'grid'], ['vitals', 'rate']);
-  mountVitals(root);
-  const grid = find(root, '[data-vitals=grid]');
-  const rssi = grid.children[3];
-
-  S.resetAll();
-  S.applyDevice({ link: 'linked' });
-  S.pushTelemetry({ t: Date.now(), tempC: 40, rssi: 0 });
-  renderVitals(S.state);
-  /* Zero dBm is not a weak signal, it is the absence of one. */
-  ok('a cable-tethered board shows no RSSI rather than zero',
-     rssi.children[1].children[0].textContent === NIL);
-  ok('and says why', rssi.children[2].textContent === 'no association');
-}
 
 /* ------------------------------------------------------------------------ */
 /* camera                                                                    */
@@ -683,6 +653,42 @@ const { mountAgent, renderGate } = await load('render/agent.js');
   ok('an answered gate stops offering the source at all',
      (renderGate({ gate: { ...flashGate, state: 'held', answeredAt: Date.now() }, ui: { review: null } }),
       !/data-gate="review"/.test(slot.innerHTML) && /HELD/.test(slot.innerHTML)));
+}
+
+/* ------------------------------------------------------------------------ */
+/* hidden means hidden, at every width                                       */
+/* ------------------------------------------------------------------------ */
+
+/* Not a renderer, but the same claim the rest of this file makes: what the
+   page says about the board must not depend on the size of the window. The
+   rule that hides the camera panel once lived inside the ≥1100px block, so a
+   picture turned off deliberately came back in a narrow window and in the
+   half-screen browser panel an agent opens the page in — the two places with
+   the least room for it. Nothing else here can catch that, because it is a
+   stylesheet and not a function. */
+{
+  const { readFileSync } = await import('node:fs');
+  const cssPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'styles', 'layout.css');
+  const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+  const needle = 'body[data-camera="off"] .panel--camera';
+  const at = css.indexOf(needle);
+  ok('the camera panel has a rule that hides it', at >= 0);
+
+  const before = css.slice(0, at);
+  const depth = (before.match(/\{/g) || []).length - (before.match(/\}/g) || []).length;
+  ok('and it is not nested inside a breakpoint, so it holds at every width',
+     depth === 0, `nested ${depth} level(s) deep`);
+
+  /* And no media block quietly turns it back on. */
+  let revived = null;
+  for (const m of css.matchAll(/@media[^{]*\{/g)) {
+    let d = 1, j = m.index + m[0].length;
+    while (j < css.length && d) { if (css[j] === '{') d++; else if (css[j] === '}') d--; j++; }
+    const body = css.slice(m.index + m[0].length, j);
+    if (/\.panel--camera[^{}]*\{[^{}]*display\s*:/.test(body)) revived = m[0].trim();
+  }
+  ok('and no breakpoint overrides the camera panel back into view', revived === null, revived || '');
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);

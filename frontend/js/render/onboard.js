@@ -19,6 +19,7 @@
    ========================================================================== */
 
 import { RUNGS } from '../onboard/session.js';
+import { describeRunning } from '../onboard/guide.js';
 
 let el = {};
 let handlers = {};
@@ -147,80 +148,39 @@ const LEDE = {
  * happening is that the flow reached a decision only a person can make.
  */
 function renderDecision(state) {
-  const f = state.found || {};
-  const pub = state.published;
+  /* One sentence saying what the board is running, and one saying what the
+     buttons do. Both come from describeRunning, which is also what the agent
+     reads through get_bring_up — so a person and a model are told the same
+     thing in the same words.
 
-  let found;
-  let ask;
+     What this deliberately no longer says is that two hashes differ. It was
+     true and it was useless: a board running an application built on this
+     harness reports the harness version and a different hash, which is the
+     ordinary state of a board that is being worked on, not a discrepancy. */
+  const r = describeRunning(state);
+  const version = r.baseline;
+  const restore = version ? `Restore baseline ${esc(version)}` : 'Restore baseline';
 
-  if (f.known) {
-    const running = f.fw ? `<strong>${esc(f.fw)}</strong>` : 'firmware this page can read';
-    found = `This board is already running ${running}.`;
-
-    if (pub?.action === 'differs' && pub.version) {
-      found += ` The known-safe baseline is <strong>${esc(pub.version)}</strong>,
-                and the two are built from different source.`;
-    } else if (pub?.action === 'same') {
-      found += ' It matches the known-safe baseline.';
-    }
-    /* The buttons are named, because the reader may be a model that has the
-       words and not the layout: which one is the ordinary answer has to be
-       in the sentence, not in the button's weight. */
-    ask = '"Continue with it" keeps what is already there and writes nothing; it is '
-        + 'the normal choice. "Restore baseline" writes the known-safe factory image; '
-        + 'stored data is erased only when the erase option is selected.';
-  } else if (f.lines) {
-    /* Counted, not characterised. Firmware this page cannot read is usually
-       not another version of this project — it is arbitrary — and naming a
-       category for it would claim knowledge that does not exist. */
-    found = `The board sent <strong>${f.lines} lines</strong> of output and none
-             of them were recognised. It is running something; what, cannot be
-             determined from here.`;
-    ask = 'Whatever it was saying is in the monitor beside this. Writing '
-        + 'replaces it, along with anything the board had stored.';
-  } else {
-    found = 'The port is open and the board has sent nothing at all.';
-    ask = 'It may be sitting in its bootloader rather than running an '
-        + 'application, which is the ordinary state of a board that has never '
-        + 'been written to.';
-  }
+  const ask = r.kind === 'unknown'
+    ? `"${version ? `Write baseline ${esc(version)}` : 'Write baseline'}" replaces whatever is `
+      + 'on the board with the known-safe image. "Listen anyway" keeps watching it and writes '
+      + 'nothing. Anything the board did say is on the wire beside this.'
+    : r.recommend === 'continue'
+      ? '"Continue with it" keeps what is already there and writes nothing; it is the normal '
+        + `choice. "${restore}" writes the known-safe factory image; stored data is erased only `
+        + 'when the erase option is selected.'
+      : `"${restore}" writes the known-safe factory image and is the answer here. "Continue with `
+        + 'it" keeps what is already there and writes nothing; stored data is erased only when '
+        + 'the erase option is selected.';
 
   el.lede.innerHTML = `
-    <p class="decide__found">${found}</p>
+    <p class="decide__found">${esc(r.headline)} <span class="decide__note">${esc(r.note)}</span></p>
     <p class="decide__ask">${ask}</p>`;
-}
-
-/**
- * The network fork.
- *
- * Written to make declining an obvious and complete answer. Telemetry runs
- * over the cable whether or not the board ever sees a network, so a page that
- * pressed for credentials here would be pressing for something nothing below
- * it needs — and somebody who gave in would then be waiting on a join that
- * bought them nothing.
- */
-function renderNetworkDecision(state) {
-  const stored = state.hello?.ssid;
-  const provisioned = !!state.hello?.provisioned;
-
-  const found = provisioned
-    ? `This board has <strong>${esc(stored || 'a network')}</strong> stored and is
-       not associated with it.`
-    : 'This board has no network stored.';
-
-  el.lede.innerHTML = `
-    <p class="decide__found">${found}</p>
-    <p class="decide__ask">Telemetry runs over the cable either way — a network is
-      what lets the board be reached once the cable is gone. The radio is 2.4 GHz
-      only. Nothing below this step depends on the answer; "Skip — use the cable"
-      is a complete one.</p>`;
 }
 
 function renderHead(state) {
   if (state.phase === 'fault' && state.fault) renderFault(state.fault);
-  else if (state.phase === 'decide' && state.rungs.network?.state === 'ask') {
-    renderNetworkDecision(state);
-  } else if (state.phase === 'decide') renderDecision(state);
+  else if (state.phase === 'decide') renderDecision(state);
   else el.lede.textContent = LEDE[state.phase] || '';
 
   const blocked = state.blocked;
@@ -298,62 +258,30 @@ function renderActions(state, blocked) {
      neither is a recovery: writing replaces what is there, and listening
      anyway is a legitimate choice for somebody who wants to watch a board they
      have no intention of overwriting. */
-  /* The network fork, which is a form rather than a pair of buttons. Skipping
-     is placed as an equal, not as a way out: nothing downstream needs a
-     network, so declining is an answer and not a failure to answer. */
-  if (state.phase === 'decide' && state.rungs.network?.state === 'ask') {
-    const form = document.createElement('form');
-    form.className = 'netform';
-    form.innerHTML = `
-      <label class="netform__field">Network name
-        <input type="text" data-ob="ssid" autocomplete="off" spellcheck="false"
-               placeholder="2.4 GHz network" value="${esc(state.hello?.ssid || '')}">
-      </label>
-      <label class="netform__field">Passphrase
-        <input type="password" data-ob="psk" autocomplete="off"
-               placeholder="leave empty for an open network">
-      </label>`;
-
-    form.addEventListener('submit', ev => {
-      ev.preventDefault();
-      const ssid = form.querySelector('[data-ob=ssid]')?.value || '';
-      const psk = form.querySelector('[data-ob=psk]')?.value || '';
-      handlers.onProvision?.(ssid, psk);
-    });
-    el.actions.appendChild(form);
-
-    add('button', 'Join this network', {
-      cls: 'btn btn--primary',
-      on: () => form.requestSubmit
-        ? form.requestSubmit()
-        : form.dispatchEvent(new Event('submit', { cancelable: true })),
-    });
-    add('button', 'Skip — use the cable', {
-      cls: 'btn', on: () => handlers.onSkipNetwork?.(),
-    });
-    return;
-  }
-
   if (state.phase === 'decide') {
-    const version = state.published?.version;
+    const r = describeRunning(state);
+    const version = r.baseline;
     const write = version ? `Write baseline ${version}` : 'Write baseline';
-    const known = !!state.found?.known;
+    const restore = version ? `Restore baseline ${version}` : 'Restore baseline';
 
-    /* Which one leads depends on what is already there, and it is never the
-       destructive one for a board that works. Writing over a board that is
-       running costs it whatever it was holding, so it is offered rather than
-       suggested — but it is offered every time, from here, so that a fresh
-       image never requires reaching a failure first. */
-    if (known) {
+    /* Which button leads is decided by what the board is running, and it is
+       never the destructive one for a board that works. A board running an
+       application, or another build of this harness version, is working: it
+       leads with keeping it. A board running an older harness, or nothing this
+       page can read, leads with writing the baseline — that is the answer, not
+       merely an option. Either way both are on screen, so a fresh image never
+       requires reaching a failure first. */
+    if (r.kind === 'unknown') {
+      add('button', write, { cls: 'btn btn--primary', on: () => handlers.onFlash?.() });
+      add('button', 'Listen anyway', { cls: 'btn', on: () => handlers.onListen?.() });
+    } else if (r.recommend === 'flash') {
+      add('button', restore, { cls: 'btn btn--primary', on: () => handlers.onFlash?.() });
+      add('button', 'Continue with it', { cls: 'btn', on: () => handlers.onContinue?.() });
+    } else {
       add('button', 'Continue with it', {
         cls: 'btn btn--primary', on: () => handlers.onContinue?.(),
       });
-      add('button', version ? `Restore baseline ${version}` : 'Restore baseline', {
-        cls: 'btn', on: () => handlers.onFlash?.(),
-      });
-    } else {
-      add('button', write, { cls: 'btn btn--primary', on: () => handlers.onFlash?.() });
-      add('button', 'Listen anyway', { cls: 'btn', on: () => handlers.onListen?.() });
+      add('button', restore, { cls: 'btn', on: () => handlers.onFlash?.() });
     }
 
     const check = document.createElement('label');

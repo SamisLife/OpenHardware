@@ -1,23 +1,17 @@
 /* ============================================================================
    session.js — bringing a board up, one rung at a time.
    ----------------------------------------------------------------------------
-   Six rungs, in the order the hardware actually does them:
+   Five rungs, in the order the hardware actually does them:
 
        CONNECT     a port, granted and open
        FLASH       fetch, verify, write — the one stage with honest progress
        BOOT        the board resets, leaves the bus, and comes back
        IDENTIFY    something on the other end that answers
-       NETWORK     optional, offered once, and skippable without consequence
        TELEMETRY   and keeps answering
 
-   NETWORK is the only rung nothing depends on. Telemetry runs over the cable
-   whether or not a board has ever seen a network, so declining is a complete
-   answer rather than a deferral, and the rung says `skipped` rather than
-   failing. It is a rung at all — rather than a control off to one side —
-   because a network decides whether the board can be reached once the cable is
-   gone, and the predecessor project found that a setting reachable from
-   several states is both easy to trigger by accident and easy to leave half
-   configured.
+   Every rung is on the path to a board that is reporting. There is no optional
+   step and nothing to decline: the cable carries everything this page needs,
+   so the flow never stops to ask about anything it does not require.
 
    FLASH always stops and asks, and it asks having already looked. It listens
    first, so the question it puts is a specific one: this board is running
@@ -52,37 +46,22 @@
    ========================================================================== */
 
 import { fault } from './faults.js';
+import { describeRunning } from './guide.js';
 import { pushGap, applyDevice, applyPeripherals, applyUi } from '../state.js';
 
-export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'network', 'telemetry'];
+export const RUNGS = ['connect', 'flash', 'boot', 'identify', 'telemetry'];
 
 const RUNG_TITLE = {
   connect: 'Connect',
   flash: 'Flash',
   boot: 'Boot',
   identify: 'Identify',
-  network: 'Network',
   telemetry: 'Telemetry',
 };
 
-/**
- * How long to wait for the board to confirm it stored what it was sent, and
- * how many times to send it.
- *
- * Sending and assuming was not enough in the predecessor project: a `prov`
- * frame that never arrived produced a page reporting success while the board
- * carried on with credentials from a previous network. The line is shared with
- * logs, telemetry and image chunks, so one lost frame is an ordinary event
- * worth retrying rather than a failure worth reporting.
- */
-const PROV_ACK_MS = 1600;
-const PROV_TRIES = 3;
 /** Activation is idempotent until its restart, and must be acknowledged. */
 const ACTIVATE_ACK_MS = 1600;
 const ACTIVATE_TRIES = 3;
-/** And how long to watch the join itself before saying what happened. */
-const JOIN_MS = 20000;
-
 /** How long to wait for a board to announce itself before giving up on it. */
 const HELLO_MS = 4000;
 /**
@@ -149,23 +128,16 @@ export class Session {
       /** What was heard on the wire before anything identified itself. */
       heard: { lines: 0, first: null },
       /**
-       * The last network status the board reported, or null.
-       *
-       * { state, ssid, ip, detail, retryMs } — whatever it has actually said,
-       * never assembled from what it was asked to do.
-       */
-      net: null,
-      /**
        * How the running firmware compares to what is published, once both are
        * known. Null while unknown, and null is the ordinary state — there may
        * be no published image to compare against at all.
        */
       published: null,
       /**
-       * What the flash rung found. { known, fw } for a board that identified
-       * itself, { known: false, lines } for one that did not — the line count
-       * being the only honest thing that can be said about firmware nobody
-       * has a name for.
+       * What the flash rung found. { known, fw, app } for a board that
+       * identified itself, { known: false, lines } for one that did not — the
+       * line count being the only honest thing that can be said about firmware
+       * nobody has a name for.
        */
       found: null,
       /**
@@ -189,7 +161,7 @@ export class Session {
    * Repaint. A renderer that throws must not take the flow down with it.
    *
    * emit() is called from inside log(), which is called from inside the
-   * reconnect, the flash and the provisioning paths. An exception in the
+   * reconnect and the flash paths. An exception in the
    * callback is therefore an exception in the middle of whichever of those is
    * running — and one bad paint once killed a reattach on its first line. The
    * model's own subscribers are guarded the same way, for the same reason.
@@ -287,7 +259,6 @@ export class Session {
     this.state.found = null;
     this.state.writing = false;
     this.state.hello = null;
-    this.state.net = null;
     this._justWritten = false;
 
     this.state.phase = 'working';
@@ -369,21 +340,15 @@ export class Session {
     await this.loadPublished(hello);
 
     this._pending = hello;
-    const version = this.state.published?.version;
 
-    if (hello) {
-      this.state.found = { known: true, fw: hello.fw || null };
-      this.rung('flash', 'ask',
-        this.state.published?.action === 'differs' && version
-          ? `running ${hello.fw || 'firmware'} · ${version} published`
-          : `already running ${hello.fw || 'this protocol'}`);
-    } else {
-      this.state.found = { known: false, lines: this.state.heard.lines };
-      this.rung('flash', 'ask',
-        this.state.heard.lines
-          ? `${this.state.heard.lines} lines of output, none recognised`
-          : 'no output at all');
-    }
+    /* The app the board reported is kept with the rest of what was found, so
+       the decision can name what is running rather than describing a hash. */
+    this.state.found = hello
+      ? { known: true, fw: hello.fw || null, app: hello.app || null }
+      : { known: false, lines: this.state.heard.lines };
+
+    /* One line, in the same words the notice and the agent get. */
+    this.rung('flash', 'ask', describeRunning(this.state).short || '');
 
     this.state.phase = 'decide';
     this.emit();
@@ -428,13 +393,27 @@ export class Session {
 
     const running = String(hello?.sha || '').toLowerCase();
     const published = String(manifest.elf_sha8 || '').toLowerCase();
+    const runningVersion = hello?.fw || null;
+    const publishedVersion = manifest.version || '';
+
+    /* Four answers rather than two, because "the hashes differ" is not a fact
+       anybody can act on. What a reader needs to know is whether the board is
+       running the published image, a DIFFERENT BUILD of the same harness —
+       which is the ordinary state of a board an agent has been compiling for,
+       and perfectly fine to keep — or an OLDER HARNESS, which is the one case
+       where writing the baseline is the recommendation rather than an option. */
+    let action = 'unknown';
+    if (running && published) {
+      if (running === published) action = 'same';
+      else if (runningVersion && runningVersion === publishedVersion) action = 'differs';
+      else action = 'outdated';
+    }
 
     this.state.published = {
-      version: manifest.version || '',
-      running: hello?.fw || null,
-      action: running && published
-        ? (running === published ? 'same' : 'differs')
-        : 'unknown',
+      version: publishedVersion,
+      sha: published || null,
+      running: runningVersion,
+      action,
     };
   }
 
@@ -776,155 +755,11 @@ export class Session {
        is worth knowing and worth nobody waiting on. */
     this.loadPublished(hello).then(() => this.emit());
 
-    return this.askNetwork(hello);
-  }
-
-  /* ---- 4. NETWORK, which is optional and says so ----------------------- */
-
-  /**
-   * Offer to put the board on a network, once, where the answer first matters.
-   *
-   * An explicit fork rather than a control off to one side. A network is a
-   * real decision with a real consequence — it is what lets the board be
-   * reached once the cable is gone — and the predecessor project learned that
-   * a button reachable from several states is both easy to trigger by accident
-   * and easy to leave half-configured.
-   *
-   * Skipped silently for a board that is already online, because there is
-   * nothing to decide: asking somebody to confirm a thing that is already true
-   * is how a flow teaches people to click past it.
-   *
-   * Telemetry runs over the cable either way. Nothing below this rung depends
-   * on it, which is why declining is a first-class answer rather than a
-   * consolation.
-   */
-  askNetwork(hello) {
-    if (hello?.net === 'online') {
-      this.state.net = { state: 'online', ssid: hello.ssid || '', ip: hello.ip || null };
-      this.rung('network', 'done',
-        [hello.ssid, hello.ip].filter(Boolean).join(' · ') || 'online');
-      return this.watchTelemetry();
-    }
-
-    this.state.net = hello?.net ? { state: hello.net, ssid: hello.ssid || '' } : null;
-    this.rung('network', 'ask', hello?.provisioned
-      ? `stored ${hello.ssid || 'a network'}, not associated`
-      : 'no network stored');
-    this.state.phase = 'decide';
-    this.emit();
-    return null;
-  }
-
-  /** Carry on over the cable. A complete answer, not a deferral. */
-  skipNetwork() {
-    this.rung('network', 'skipped', 'reporting over the cable');
-    this.state.phase = 'working';
-    this.emit();
     return this.watchTelemetry();
   }
 
-  /**
-   * Hand the board credentials, then watch what it does with them.
-   *
-   * Sent and confirmed rather than sent and assumed. The board acknowledges
-   * every `prov`, so there is no reason to guess — and the acknowledgement
-   * quotes what it re-read out of flash, so a write that silently failed
-   * cannot come back looking like a success.
-   */
-  async provision(ssid, psk = '') {
-    const name = String(ssid || '').trim();
-    if (!name) return this.fail('network', 'no_ssid');
 
-    this.state.fault = null;
-    this.state.phase = 'working';
-    this.rung('network', 'active', `sending credentials for "${name}"`);
-
-    const payload = { t: 'prov', ssid: name, psk: psk || '' };
-    /* The passphrase is starred in the log rather than omitted, so the record
-       shows that one was sent and how long it was, without carrying it. */
-    const shown = `> prov {ssid:"${name}", psk:"${'*'.repeat((psk || '').length)}"}`;
-
-    let ack = null;
-    for (let attempt = 1; attempt <= PROV_TRIES && !ack; attempt++) {
-      /* Armed BEFORE the frame goes out, not after.
-       *
-       * The reply can arrive before the send call has even returned — the
-       * simulated board answers synchronously, and a real one on a short cable
-       * is not much slower than the promise machinery here. A listener
-       * attached afterwards has already missed it, and what that produces is
-       * three resends of credentials the board stored correctly the first
-       * time, followed by a fault reporting that nothing was stored. */
-      const reply = this.awaitFrame('prov_ack', PROV_ACK_MS);
-
-      try {
-        if (!(await this.link?.send(payload))) {
-          return this.fail('network', 'link_dropped', 'the port would not accept the write');
-        }
-      } catch (err) {
-        return this.fail('network', 'link_dropped', err.message);
-      }
-
-      this.log(attempt === 1 ? shown : `${shown}  (resend ${attempt}/${PROV_TRIES})`, 'frame');
-      this.rung('network', 'active', 'waiting for the board to confirm');
-      ack = await reply;
-    }
-
-    if (!ack) {
-      /* Every identity frame carries how many bytes the board has ever
-         received. Still zero after three sends means nothing this page
-         transmits is arriving at all — which is a fault in the link, not in
-         the credentials, and sends somebody somewhere completely different. */
-      const deaf = Number(this.state.hello?.rx) === 0;
-      return this.fail('network', deaf ? 'nothing_arrives' : 'no_prov_ack');
-    }
-
-    if (ack.ok === false) {
-      return this.fail('network', 'prov_refused', ack.err || 'the board refused it');
-    }
-
-    /* What the board read back, not what it was sent. */
-    this.log(`< prov_ack ssid:"${ack.ssid}"`
-           + `${ack.has_psk ? ' with a passphrase' : ' (open network)'}`, 'frame');
-
-    return this.watchJoin(name);
-  }
-
-  /**
-   * Wait for the board to say it associated, or say why it has not.
-   *
-   * A failure here is not a fault in the flow. The firmware backs off and
-   * keeps trying forever, so what this reports is the state at the moment of
-   * asking, with the reason the board gave — and the board is still going.
-   */
-  async watchJoin(ssid) {
-    this.rung('network', 'active', `joining ${ssid}`);
-
-    const status = await this.awaitStatus(['wifi_ok', 'wifi_fail'], JOIN_MS);
-
-    if (status?.stage === 'wifi_ok') {
-      this.state.net = { state: 'online', ssid, ip: status.ip || null };
-      this.rung('network', 'done', [ssid, status.ip].filter(Boolean).join(' · '));
-      this.state.phase = 'working';
-      this.emit();
-      return this.watchTelemetry();
-    }
-
-    this.state.net = {
-      state: 'retrying', ssid,
-      detail: status?.detail || null,
-      retryMs: Number(status?.retry_ms) || null,
-    };
-    /* The observation is the board's own sentence when it gave one. Inventing
-       a cause for a silent join would be exactly the thing this page refuses
-       to do everywhere else. */
-    this.state.fault = fault(status ? 'wifi_failed' : 'wifi_silent',
-                             status?.detail || null);
-    this.state.phase = 'fault';
-    this.rung('network', 'fault', status?.detail || 'no answer from the board');
-    this.emit();
-    return null;
-  }
-
+  /* ---- 4. TELEMETRY --------------------------------------------------- */
 
   awaitHello(timeoutMs) {
     return new Promise(resolve => {
@@ -1233,16 +1068,6 @@ export class Session {
     }
     if (frame.t === 'status') {
       this.log(`${frame.stage}${frame.detail ? ` · ${frame.detail}` : ''}`, 'meta');
-    }
-
-    /* The network state is read off what the board says, never assembled from
-       what it was asked to do. A board told to join and still retrying must
-       not read as online anywhere on this page. */
-    if (frame.t === 'beat' && typeof frame.net === 'string') {
-      if (this.state.net?.state !== frame.net) {
-        this.state.net = { ...(this.state.net || {}), state: frame.net };
-        this.emit();
-      }
     }
 
     /* Run over a copy: a waiter that resolves removes itself from the set. */

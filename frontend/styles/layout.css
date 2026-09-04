@@ -301,6 +301,17 @@ ul, ol { list-style: none; }
   min-height: 0;
 }
 
+/* Hidden means hidden, at every width.
+ *
+ * This rule used to live inside the ≥1100px block, beside the grid areas it
+ * is related to, and so it stopped applying exactly where the window is
+ * smallest — a narrow window, or the browser panel an agent opens the page
+ * in, which is half a screen. The picture came back in the one place there is
+ * least room for it, having been turned off deliberately. The grid-area
+ * rearrangement below is genuinely layout-specific and stays in its
+ * breakpoints; whether the panel exists at all is not. */
+body[data-camera="off"] .panel--camera { display: none; }
+
 /* ---- ≥1100px: a fixed instrument -------------------------------------- */
 
 @media (min-width: 1100px) {
@@ -331,7 +342,6 @@ ul, ol { list-style: none; }
      the explicit template out of the way and collapses the whole instrument
      into a single stacked column. Adding a panel means adding it here. */
   .panel--camera   { grid-area: camera; }
-  body[data-camera="off"] .panel--camera { display: none; }
   .panel--vitals   { grid-area: vitals; }
   .panel--agent    { grid-area: agent; }
   .panel--firmware { grid-area: firmware; }

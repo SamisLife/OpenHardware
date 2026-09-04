@@ -22,10 +22,10 @@ THE PORT IS EXCLUSIVE, MACHINE-WIDE
     about the firmware instead of evidence about the whole stack.
 
 IT WRITES ONLY WHEN ASKED
-    --prov hands a board its network credentials and --cam turns the camera on,
-    and then both go on watching, so the acknowledgement and whatever follows
-    land on the same record as everything else. Those are the only frames this
-    tool sends. They are here because the port is exclusive: something has to
+    --cam turns the camera on and --scan probes the header, and then both go on
+    watching, so the acknowledgement and whatever follows land on the same
+    record as everything else. Those are the only frames this tool sends.
+    They are here because the port is exclusive: something has to
     be able to drive a board while the page that would normally do it cannot
     hold the port — which also makes this the way to tell a board that will not
     stream from a page that cannot ask it to.
@@ -105,10 +105,9 @@ def encode_frame(obj) -> bytes:
     """
     One object as a framed line, newline included.
 
-    The only thing this tool ever writes. It exists so that credentials can be
-    handed to a board without a browser: the port is exclusive machine-wide, so
-    while this is watching a join happen it is the only thing that could have
-    started one.
+    The only thing this tool ever writes. It exists so a board can be driven
+    without a browser: the port is exclusive machine-wide, so while this is
+    watching it is the only thing that could have asked for anything.
 
     Refused rather than truncated when it will not fit. A frame the far end is
     guaranteed to drop is better rejected here, where the caller is still
@@ -818,13 +817,8 @@ def run(port_name, args, out, watch, outbound=()):
                 if pending and frame.get('t') in ('hello', 'beat'):
                     for f in pending:
                         port.write(encode_frame(f))
-                        if f['t'] == 'prov':
-                            out.line('meta', '   > prov %s%s' % (
-                                f['ssid'],
-                                ' (with a passphrase)' if f.get('psk') else ' (open network)'))
-                        else:
-                            out.line('meta', '   > %s'
-                                     % json.dumps(f, separators=(',', ':')))
+                        out.line('meta', '   > %s'
+                                 % json.dumps(f, separators=(',', ':')))
                     pending = []
             else:
                 watch.text(line, reason)
@@ -861,14 +855,6 @@ def main():
                    help='set QQVGA, QVGA, CIF, HVGA, VGA, SVGA, XGA, HD, SXGA or UXGA')
     p.add_argument('--quality', type=int, metavar='N',
                    help='JPEG quality for --cfg (10..63); omitted uses the running value')
-    p.add_argument('--prov', metavar='SSID',
-                   help='hand the board this network, then watch it join')
-    p.add_argument('--psk', metavar='PASSPHRASE',
-                   help='the passphrase for --prov. Omit it and it is asked for '
-                        'without echoing, which keeps it out of the shell history; '
-                        'pass an empty string for an open network')
-    p.add_argument('--server', metavar='URL',
-                   help='optional device API base URL, stored alongside the network')
     args = p.parse_args()
 
     if args.quality is not None and not args.cfg:
@@ -885,19 +871,6 @@ def main():
     if args.cam:
         outbound.append({'t': 'cam', 'on': True})
 
-    prov = None
-    if args.prov:
-        psk = args.psk
-        if psk is None:
-            # Asked for rather than taken from argv. A passphrase on a command
-            # line survives in the shell history of whoever ran it, and this
-            # one is going to a board somebody else may later own.
-            import getpass
-            psk = getpass.getpass('passphrase for %s (blank if open): ' % args.prov)
-        prov = {'t': 'prov', 'ssid': args.prov, 'psk': psk}
-        if args.server:
-            prov['server'] = args.server
-        outbound.append(prov)
 
     if serial is None:
         sys.exit('monitor.py needs pyserial to reach a port:\n\n    pip install pyserial\n')

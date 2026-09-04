@@ -328,22 +328,12 @@ const manifest = (over = {}) => ({
   ok('the board comes back', s.state.rungs.boot.state === 'done');
   ok('and identifies itself again', s.state.rungs.identify.state === 'done');
 
-  /* The flow stops here rather than running on. A network decides whether the
-     board can be reached without the cable, which is a decision for a person
-     and not something to happen on the way past. */
-  ok('and stops to ask about a network', s.state.rungs.network.state === 'ask');
-  ok('which is a decision, not a fault', s.state.phase === 'decide');
-  ok('and telemetry has not been declared live yet',
-     s.state.rungs.telemetry.state === 'idle');
-
-  /* Declining is a complete answer: nothing below this rung needs a network. */
-  await s.skipNetwork();
-  await wait(400);
-
-  ok('skipping is recorded as skipped, not failed',
-     s.state.rungs.network.state === 'skipped', s.state.rungs.network.state);
-  ok('and reports', s.state.rungs.telemetry.state === 'done');
-  ok('which ends bring-up', s.state.phase === 'done');
+  /* Nothing stops the flow between identifying and reporting. There is no
+     optional step to decline: the cable carries everything, so a board that
+     has identified itself goes straight on to telemetry. */
+  ok('it goes straight on to reporting', s.state.rungs.telemetry.state === 'done',
+     s.state.rungs.telemetry.state);
+  ok('which ends bring-up with nothing else to answer', s.state.phase === 'done');
   await s.dispose();
 }
 
@@ -406,113 +396,6 @@ const manifest = (over = {}) => ({
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
 
-
-/* ------------------------------------------------------------------------ */
-/* the network rung                                                          */
-/* ------------------------------------------------------------------------ */
-
-/** Reach the network decision on a simulated board that has just been written. */
-async function atNetworkDecision(scene = '') {
-  const s = new Session(simulatedDriver(scene), () => {});
-  await s.connect();
-  await s.flash();
-  await wait(400);
-  return s;
-}
-
-{
-  const s = await atNetworkDecision();
-  ok('a fresh board is asked about a network', s.state.rungs.network.state === 'ask');
-  ok('and the board says it has none stored', s.state.hello?.provisioned === false);
-
-  await s.provision('bench-2g', 'hunter2');
-  await wait(2200);
-
-  ok('a network the board joined is reported as joined',
-     s.state.rungs.network.state === 'done', s.state.rungs.network.detail);
-  ok('with the address the board gave, not one assumed',
-     /^192\.168\.1\./.test(s.state.net?.ip || ''), s.state.net?.ip);
-  ok('and bring-up continues to telemetry', s.state.phase === 'done');
-
-  /* The passphrase must not reach the record. Its length may. */
-  const leaked = s.monitor.filter(l => /hunter2/.test(l.text));
-  ok('the passphrase is never written to the monitor', leaked.length === 0,
-     leaked.map(l => l.text).join(' | '));
-  ok('but the fact one was sent is', s.monitor.some(l => /psk:"\*{7}"/.test(l.text)));
-
-  await s.dispose();
-}
-
-{
-  /* The board keeps retrying forever, so this reports the state at the moment
-     of asking — with the board's own sentence, not one invented here. */
-  const s = await atNetworkDecision('badwifi');
-  await s.provision('bench-2g', 'wrong');
-  await wait(2500);
-
-  ok('a join that failed is reported as a fault on the network rung',
-     s.state.rungs.network.state === 'fault');
-  ok('and it is the board\'s own explanation that is shown',
-     /rejected the password/.test(s.state.rungs.network.detail || ''),
-     s.state.rungs.network.detail);
-  ok('the fault names candidates rather than asserting one',
-     Array.isArray(FAULTS.wifi_failed.causes) && FAULTS.wifi_failed.causes.length > 1);
-
-  /* The distinction that matters: the cable still works. A fault here must not
-     read as the end of the bring-up. */
-  ok('and it says telemetry over the cable is unaffected',
-     /cable is unaffected/i.test(FAULTS.wifi_failed.next), FAULTS.wifi_failed.next);
-
-  await s.dispose();
-}
-
-{
-  const s = await atNetworkDecision();
-  await s.provision('   ', '');
-  ok('an empty network name is refused before anything is sent',
-     s.state.fault?.code === 'no_ssid', s.state.fault?.code);
-  ok('and no cause in the hardware is named for it',
-     FAULTS.no_ssid.causes.every(c => !/board|firmware|cable/i.test(c)));
-  await s.dispose();
-}
-
-{
-  /* A board that never confirms. Sending and assuming was the predecessor's
-     bug: a page reporting success while the board kept its old network. */
-  const s = await atNetworkDecision();
-  let sends = 0;
-  s.link.send = async obj => { if (obj.t === 'prov') sends++; return true; };
-
-  await s.provision('bench-2g', 'x');
-
-  ok('an unconfirmed prov is retried rather than assumed', sends === 3, `${sends} sends`);
-  ok('and the failure says nothing was stored',
-     s.state.fault?.code === 'no_prov_ack', s.state.fault?.code);
-  ok('which is stated as a fact about storage, not about the network',
-     /never confirmed storing/i.test(FAULTS.no_prov_ack.observed));
-  await s.dispose();
-}
-
-{
-  /* Split on a measurement the board publishes: bytes it has ever received.
-     Zero after three sends is a dead inbound link, which is somewhere else
-     entirely from credentials the board disliked.
-
-     Built directly rather than through the flow, because a board that has
-     genuinely received nothing is one whose every write was swallowed from the
-     start — and a board driven through bring-up has already answered a ping. */
-  const s = new Session(simulatedDriver(''), () => {});
-  s.state.hello = { rx: 0 };
-  s.link = { send: async () => true };
-
-  await s.provision('bench-2g', 'x');
-
-  ok('a board that has received nothing at all is a different fault',
-     s.state.fault?.code === 'nothing_arrives', s.state.fault?.code);
-  ok('and that fault does not blame the credentials',
-     FAULTS.nothing_arrives.causes.every(c => !/passphrase|password|network name/i.test(c)));
-  await s.dispose();
-}
 
 console.log(`
   ${pass} passed, ${fail} failed

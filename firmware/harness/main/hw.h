@@ -61,17 +61,13 @@
 
 #define HW_NVS_NS       "openhw"
 
-typedef struct {
-    char ssid[33];
-    char psk[65];
-    char server[128];
-    bool have_wifi;
-} hw_creds_t;
-
+/**
+ * Flash storage, which now holds one kind of thing: the counters that have to
+ * survive a board hanging or panicking mid-attempt. There are no credentials
+ * and no server address — this board reports over its cable and has nothing to
+ * configure — so the only reason this exists is the crash counters below.
+ */
 esp_err_t hw_prov_init(void);
-void      hw_prov_load(hw_creds_t *out);
-esp_err_t hw_prov_save_wifi(const char *ssid, const char *psk, const char *server);
-esp_err_t hw_prov_erase(void);
 
 /* ------------------------------------------------------------------------ */
 /* the wire                                                                  */
@@ -167,65 +163,6 @@ uint32_t hw_sensors_psram_largest(void);
 uint32_t hw_sensors_psram_size(void);
 uint32_t hw_sensors_flash_size(void);
 int      hw_sensors_cpu_mhz(void);
-
-/* ------------------------------------------------------------------------ */
-/* the network, which is optional and must stay that way                     */
-/* ------------------------------------------------------------------------ */
-
-/**
- * IDLE       no credentials stored, or the radio would not start
- * JOINING    associating, or waiting for an address
- * CONNECTED  associated and addressed
- * RETRYING   dropped, waiting out a backoff before the next attempt
- *
- * There is deliberately no FAILED. Nothing here gives up, so no state can
- * mean it has. RETRYING is where a board that cannot reach its network lives
- * indefinitely, and it is a state a person can read and act on.
- *
- * None of this is a prerequisite for anything. The cable carries the full
- * heartbeat with no network at all; a radio is an additional consumer of the
- * same sample, never a condition for producing it.
- */
-typedef enum {
-    HW_NET_IDLE = 0,
-    HW_NET_JOINING,
-    HW_NET_CONNECTED,
-    HW_NET_RETRYING,
-} hw_net_state_t;
-
-/**
- * Join a network, or swap credentials on one already running.
- *
- * Returns once the attempt is under way rather than once it has succeeded:
- * joining takes as long as the network takes, and a caller blocked on it is a
- * caller not reporting. Progress arrives as `wifi_join`, `wifi_ok` and
- * `wifi_fail` status frames.
- *
- * An error here means the radio could not be brought up at all. It does not
- * mean the board is in trouble — a board with no network and a working cable
- * is fully observable, which is the entire point of the bring-up order.
- */
-esp_err_t hw_net_start(const char *ssid, const char *psk);
-
-hw_net_state_t hw_net_state(void);
-const char    *hw_net_state_str(void);
-bool           hw_net_online(void);
-const char    *hw_net_ssid(void);
-
-/** The last disconnect explained in words, or NULL if nothing has gone wrong. */
-const char    *hw_net_last_error(void);
-
-/** @return false when there is no address, leaving *out untouched. */
-bool hw_net_ip(const char **out);
-
-/**
- * @return false when there is no association to measure.
- *
- * Not zero. Zero dBm is an extraordinarily strong signal rather than a missing
- * one, and a meter drawing full bars for a board with no radio associated is
- * the failure this instrument exists to prevent.
- */
-bool hw_net_rssi(int *out);
 
 /* ------------------------------------------------------------------------ */
 /* pictures on the wire                                                      */

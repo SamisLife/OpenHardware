@@ -22,12 +22,12 @@ const ok = (name, cond, extra = '') => {
   else { fail++; console.log(`  FAIL  ${name}${extra ? '  — ' + extra : ''}`); }
 };
 
-const { describeBringUp, HOW_IT_WORKS } = await load('onboard/guide.js');
+const { describeBringUp, describeRunning, HOW_IT_WORKS } = await load('onboard/guide.js');
 
-const RUNGS = ['connect', 'flash', 'boot', 'identify', 'network', 'telemetry'];
+const RUNGS = ['connect', 'flash', 'boot', 'identify', 'telemetry'];
 const base = (over = {}) => ({
   phase: 'idle', active: null, hasPort: false, simulated: false, blocked: null,
-  hello: null, found: null, published: null, net: null, fault: null,
+  hello: null, found: null, published: null, fault: null,
   rungs: Object.fromEntries(RUNGS.map(r => [r, { id: r, title: r.toUpperCase(), state: 'idle', detail: '' }])),
   ...over,
 });
@@ -42,7 +42,7 @@ const person = (g, label) => g.waitingOn.options.find(o => o.label === label)?.n
   ok('choosing a port is marked as a person\'s', person(g, 'Connect a board') === true);
   ok('and the reader with no hardware is told about ?sim', /\?sim/.test(g.next));
   ok('the flow is explained once, as sentences', Array.isArray(g.howItWorks) && g.howItWorks === HOW_IT_WORKS && g.howItWorks.length >= 5);
-  ok('six rungs are listed with their state', g.rungs.length === 6 && g.rungs.every(r => r.state === 'idle'));
+  ok('every rung is listed with its state', g.rungs.length === 5 && g.rungs.every(r => r.state === 'idle'));
 }
 
 {
@@ -59,49 +59,101 @@ const person = (g, label) => g.waitingOn.options.find(o => o.label === label)?.n
      g.waitingOn.who === 'board' && /waiting for the board to come back/.test(g.next) && g.waitingOn.options.length === 0);
 }
 
+/* ------------------------------------------------------------------------ */
+/* what the board is running, which is the whole flash decision              */
+/* ------------------------------------------------------------------------ */
+
 {
+  /* The exact published image. Nothing to do. */
   const s = base({
-    phase: 'decide', hello: { fw: '0.13.4' }, found: { known: true, fw: '0.13.4' },
+    phase: 'decide', found: { known: true, fw: '0.13.4', app: { name: 'default', ver: '1.0' } },
     published: { action: 'same', version: '0.13.4' },
   });
-  s.rungs.flash = { ...s.rungs.flash, state: 'ask', detail: 'already running 0.13.4' };
+  const r = describeRunning(s);
+  ok('an image that matches the baseline is named as the baseline',
+     r.kind === 'baseline' && /known-safe baseline/.test(r.headline), r.headline);
+  ok('and keeping it is the recommendation', r.recommend === 'continue');
+
   const g = describeBringUp(s);
-  ok('the flash decision names the firmware and says it matches',
-     /already running 0\.13\.4/.test(g.next) && /matches the known-safe baseline/.test(g.next));
-  ok('and says which choice is the normal one', /"Continue with it" keeps it and writes nothing; that is the normal choice/.test(g.next));
+  ok('the decision says what is running, not that two hashes differ',
+     /known-safe baseline/.test(g.next) && !/hash/i.test(g.next), g.next);
   ok('continuing writes nothing and needs no person', person(g, 'Continue with it') === false);
   ok('restoring the baseline is a person\'s decision', person(g, 'Restore baseline 0.13.4') === true);
   ok('the board block carries both versions and the comparison',
      g.board.firmware === '0.13.4' && g.board.published === '0.13.4' && g.board.comparison === 'same');
+  ok('and says in one word what it is running', g.board.running === 'baseline');
 }
 
 {
+  /* An application built on this harness. Same version, different hash — the
+     ordinary state of a board being worked on, and the case that used to be
+     reported as a discrepancy. */
   const s = base({
-    phase: 'decide', hello: { fw: '0.12.0' }, found: { known: true, fw: '0.12.0' },
-    published: { action: 'differs', version: '0.13.4', running: '0.12.0' },
+    phase: 'decide',
+    found: { known: true, fw: '0.14.1', app: { name: 'oled_hello', ver: '1.0.1' } },
+    published: { action: 'differs', version: '0.14.1', running: '0.14.1' },
   });
-  s.rungs.flash = { ...s.rungs.flash, state: 'ask', detail: 'running 0.12.0 · 0.13.4 published' };
+  const r = describeRunning(s);
+  ok('an application is named, with the harness it was built on',
+     r.kind === 'app' && /oled_hello 1\.0\.1/.test(r.headline) && /0\.14\.1/.test(r.headline),
+     r.headline);
+  ok('and it is not reported as anything being wrong',
+     r.recommend === 'continue' && !/hash|differ|mismatch/i.test(r.headline + r.note), r.note);
+
   const g = describeBringUp(s);
-  ok('a differing image is named without pressing for the write',
-     /known-safe baseline is 0\.13\.4/.test(g.next) && person(g, 'Continue with it') === false);
+  ok('the agent is told keeping it is the normal answer',
+     /normal answer/.test(g.next) && person(g, 'Continue with it') === false);
+  ok('and the app is offered as data, not only as prose',
+     g.board.app?.name === 'oled_hello' && g.board.recommend === 'continue');
+}
+
+{
+  /* Same harness version, no application: another build of the harness. */
+  const s = base({
+    phase: 'decide', found: { known: true, fw: '0.14.1', app: { name: 'default', ver: '1.0' } },
+    published: { action: 'differs', version: '0.14.1', running: '0.14.1' },
+  });
+  const r = describeRunning(s);
+  ok('another build of the same harness is described as exactly that',
+     r.kind === 'build' && /a build based on harness 0\.14\.1/.test(r.headline), r.headline);
+  ok('and keeping it still leads', r.recommend === 'continue');
+}
+
+{
+  /* A different harness version. This is the one where writing leads. */
+  const s = base({
+    phase: 'decide', found: { known: true, fw: '0.12.0' },
+    published: { action: 'outdated', version: '0.14.1', running: '0.12.0' },
+  });
+  const r = describeRunning(s);
+  ok('an older harness is named against the baseline that replaces it',
+     r.kind === 'outdated' && /0\.12\.0/.test(r.headline) && /0\.14\.1/.test(r.headline), r.headline);
+  ok('and writing the baseline is the recommendation', r.recommend === 'flash');
+
+  const g = describeBringUp(s);
+  ok('the agent is told the restore is the answer here',
+     /is the answer here/.test(g.next), g.next);
+  ok('and continuing is still reachable', labels(g).includes('Continue with it'));
 }
 
 {
   const s = base({ phase: 'decide', found: { known: false, lines: 12 }, published: { version: '0.13.4' } });
-  s.rungs.flash = { ...s.rungs.flash, state: 'ask', detail: '12 lines of output, none recognised' };
   const g = describeBringUp(s);
   ok('unrecognised firmware is counted, not characterised',
-     /12 lines of output and none were recognised/.test(g.next) && !/version|protocol/.test(g.next));
+     /12 lines of output and none of them were recognised/.test(g.next) && !/version|protocol/.test(g.next),
+     g.next);
   ok('writing is offered as a person\'s choice, listening as a safe one',
      person(g, 'Write baseline 0.13.4') === true && person(g, 'Listen anyway') === false);
+  ok('and it is the answer rather than one of two equals',
+     /is the answer here/.test(g.next), g.next);
 }
 
 {
-  const s = base({ phase: 'decide', hello: { fw: '0.13.4', net: 'offline', provisioned: false } });
-  s.rungs.network = { ...s.rungs.network, state: 'ask', detail: 'no network stored' };
-  const g = describeBringUp(s);
-  ok('the network fork says the cable is enough', /Skip — use the cable/.test(g.next) && /normal answer/.test(g.next));
-  ok('skipping needs no person; joining does', person(g, 'Skip — use the cable') === false && person(g, 'Join this network') === true);
+  /* Nothing about a network is described any more, because there is none. */
+  const g = describeBringUp(base({ phase: 'decide', found: { known: true, fw: '0.14.1' } }));
+  const all = [g.next, ...g.howItWorks, ...labels(g)].join(' ');
+  ok('the flow never mentions a network, a radio or credentials',
+     !/wi-?fi|network|ssid|credential|passphrase/i.test(all), all.slice(0, 160));
 }
 
 {

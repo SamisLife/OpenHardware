@@ -40,7 +40,6 @@
      heapTotal            total internal DRAM, bytes    (see limits)
      psramFree            free PSRAM, bytes
      psramLargestBlock    largest CONTIGUOUS free PSRAM block, bytes
-     rssi                 dBm, or absent when there is no association
      cpuMhz               current clock
      fps                  measured frame rate, not a configured one
 
@@ -76,7 +75,6 @@ const PLAUSIBLE = {
   heapTotal: [0, Infinity],
   psramFree: [0, Infinity],
   psramLargestBlock: [0, Infinity],
-  rssi: [-120, 0],
 };
 
 export const state = {
@@ -86,8 +84,6 @@ export const state = {
     board: null,
     mcu: null,
     mac: null,
-    ip: null,
-    ssid: null,
     /** 'linked' | 'rebooting' | 'lost' | 'offline' */
     link: 'offline',
     /** epoch ms of the last heartbeat seen */

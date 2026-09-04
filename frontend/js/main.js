@@ -231,8 +231,6 @@ mountOnboard($('#onboard'), {
   onFlash: () => session?.flash({ eraseAll: eraseChecked() }),
   onListen: () => session?.listen(),
   onContinue: () => session?.continueWithBoard(),
-  onProvision: (ssid, psk) => session?.provision(ssid, psk),
-  onSkipNetwork: () => session?.skipNetwork(),
   onRetry: () => retry(),
   /* The flag, not the rung. The flash rung is also active while it is reading
      what the board already has, and warning about that trains somebody to
@@ -635,7 +633,6 @@ const toolFx = {
         eraseAll: false,
         imageBase: opts?.imageBase || buildClient.baselineBase,
       });
-      if (session?.state.phase === 'decide') await session.skipNetwork();
       const s = session?.state;
       return {
         phase: s?.phase || null,
@@ -643,7 +640,6 @@ const toolFx = {
         flashDone: s?.rungs?.flash?.state === 'done',
       };
     },
-    provision: (ssid, psk) => session?.provision(ssid, psk),
     manifest: () => session?.driver?.fetchManifest?.() || fetchManifest(),
     build: buildClient,
     wireTail: lines => (session?.monitor || []).slice(-lines).map(row => ({

@@ -83,21 +83,6 @@ export function ago(t, now = Date.now()) {
   return `${Math.floor(s / 60)}m`;
 }
 
-/**
- * RSSI in dBm mapped to a 0..4 bar count.
- *
- * Banded rather than linear, using the thresholds the ESP-IDF examples use —
- * signal strength is not perceived linearly and a linear mapping shows four
- * bars for a link that is about to drop.
- */
-export function rssiBars(dbm) {
-  if (!Number.isFinite(dbm)) return 0;
-  if (dbm >= -55) return 4;
-  if (dbm >= -66) return 3;
-  if (dbm >= -77) return 2;
-  if (dbm >= -88) return 1;
-  return 0;
-}
 
 /**
  * The inferno colormap, sampled at `t` in 0..1.

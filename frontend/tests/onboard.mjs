@@ -233,7 +233,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   ok('the question is asked on the flash rung',
      s.state.rungs.flash.state === 'ask', s.state.rungs.flash.state);
   ok('and the rung says only what was observed',
-     /4 lines of output, none recognised/.test(s.state.rungs.flash.detail),
+     /4 lines, none recognised/.test(s.state.rungs.flash.detail),
      s.state.rungs.flash.detail);
 
   /* A board running something else is not a broken board. */

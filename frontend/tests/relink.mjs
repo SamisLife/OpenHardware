@@ -103,7 +103,6 @@ async function live(driver) {
   const s = new Session(driver, () => {});
   await s.connect();
   await s.continueWithBoard();
-  await s.skipNetwork();
   await wait(500);
   return s;
 }
@@ -215,7 +214,6 @@ async function live(driver) {
     const s = new Session(d, () => { paints++; throw new Error('renderer died'); });
     await s.connect();
     await s.continueWithBoard();
-    await s.skipNetwork();
     await wait(500);
     ok('bring-up completes despite a renderer that throws on every paint',
        s.state.phase === 'done', `phase ${s.state.phase} after ${paints} paints`);

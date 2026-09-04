@@ -81,7 +81,7 @@ function fakeModelContext() {
      s.fields.tempC.min === 40 && s.fields.tempC.max === 41.125 && Math.abs(s.fields.tempC.mean - 40.5625) < 1e-3,
      JSON.stringify(s.fields.tempC));
   ok('slope is in units per second', Math.abs(s.fields.tempC.slopePerS - 0.5) < 1e-6, s.fields.tempC.slopePerS);
-  ok('a field never measured is null, not zero', s.fields.fps === null && s.fields.rssi === null);
+  ok('a field never measured is null, not zero', s.fields.fps === null);
   ok('raw samples are not in the result', !('samples' in s.fields) && !Array.isArray(s.fields.tempC));
 
   const narrow = summarize(buf, { windowMs: 600, now: t0 + 2250 });
@@ -98,7 +98,6 @@ const feed = createFeed({ source: 'sim' });
 const link = board.attach({ onFrame: f => feed.handleFrame(f), onText: () => {} });
 
 let flashed = 0;
-let provisioned = null;
 const fx = {
   setCamera: on => link.send({ t: 'cam', on }),
   setConfig: configEffector(obj => link.send(obj)),
@@ -112,7 +111,6 @@ const fx = {
       ? { ok: false, error: 'artifact source not found' }
       : { ok: true, files: { 'app.c': `/* ${id} */ void app_setup(void) {}` } }),
   },
-  provision: async (ssid, psk) => { provisioned = { ssid, hasPsk: !!psk }; },
   manifest: async () => ({ version: '0.12.0', project: 'openhardware_harness', elf_sha8: 'abc', total_bytes: 880384, parts: [] }),
   source: () => 'sim',
   /* The page's scan: ask the board, wait for the feed to fold the answer in. */
@@ -138,7 +136,7 @@ const call = async (name, input = {}, signal) => {
 
 const READ = ['get_wiring', 'scan_bus', 'capture_frame', 'get_app_source', 'get_board', 'get_bring_up', 'get_build', 'get_images', 'get_learned_limits', 'get_telemetry_summary', 'get_wire_tail', 'get_work_order'];
 const PAGE = ['build_firmware', 'record_attempt'];
-const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baseline', 'run_experiment', 'set_camera', 'set_camera_config', 'watch_for'];
+const WRITE = ['flash_image', 'record_limit', 'restore_baseline', 'run_experiment', 'set_camera', 'set_camera_config', 'watch_for'];
 
 /* ------------------------------------------------------------------------ */
 /* registration follows the link                                             */
@@ -326,9 +324,9 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
 
   const p2 = call('flash_image', { buildId: 'b1' });
   await wait(20);
-  const p3 = call('provision_wifi', { ssid: 'bench' });
+  const p3 = call('restore_baseline', {});
   const busy = await p3;
-  ok('a second gate while one is pending is refused as busy', busy.ok === false && busy.refused === 'busy', JSON.stringify(busy));
+  ok('a second write while one is pending is refused as busy', busy.ok === false && busy.refused === 'busy', JSON.stringify(busy));
 
   approvePending();
   const done = await p2;
@@ -336,12 +334,13 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
   ok('and the board was written exactly once', flashed === 1);
 
   const ctl = new AbortController();
-  const p4 = call('provision_wifi', { ssid: 'bench', psk: 'x' }, ctl.signal);
+  const before = flashed;
+  const p4 = call('restore_baseline', {}, ctl.signal);
   await wait(20);
   ctl.abort();
   const gone = await p4;
   ok('an agent that cancels while waiting gets cancelled, not approval',
-     gone.ok === false && gone.refused === 'cancelled' && provisioned === null, JSON.stringify(gone));
+     gone.ok === false && gone.refused === 'cancelled' && flashed === before, JSON.stringify(gone));
 
   ok('approve and hold are not tools', !mc.names().some(n => /approve|hold/i.test(n)));
 }

@@ -40,7 +40,6 @@
 
 static const char *TAG = "harness";
 
-static hw_creds_t s_creds;
 static char s_boot_id[9];
 static char s_mac[18];
 static char s_sha[17];
@@ -292,12 +291,8 @@ static void send_hello(void)
     /* Omitted entirely when there is no sensor, rather than sent as a
        sentinel. A magic value travels the wire indistinguishable from a
        measurement; an absent field can only be read one way. */
-    const char *ip = NULL;
-    const bool have_ip = hw_net_ip(&ip);
-
     char opt[96] = {0};
     int used = opt_f(opt, sizeof opt, 0, "temp_c", have_temp, temp);
-    used = opt_s(opt, sizeof opt, used, "ip", have_ip, ip);
     /* The slot the bootloader abandoned, when there is one. Absent otherwise:
        a rollback that did not happen must not travel as an empty string. */
     const char *aborted = aborted_slot();
@@ -309,14 +304,14 @@ static void send_hello(void)
                  (unsigned)hw_app_crash_tries());
     }
 
-    /* `net` is always present because the state is always known — a board with
-       no radio brought up is "offline", which is a fact rather than a missing
-       reading. The address is the part that can genuinely be absent. */
+    /* This board reports over the cable and nothing else. There is no radio,
+       no stored credentials and no network state, so the identity frame says
+       nothing about any of them rather than carrying fields that are always
+       the same. */
     hw_proto_sendf("hello",
         "\"proto\":%d,\"fw\":\"%s\",\"sha\":\"%s\",\"slot\":\"%s\","
         "\"board\":\"%s\",\"board_name\":\"%s\",\"chip\":\"esp32s3\","
         "\"mac\":\"%s\",\"boot_id\":\"%s\",\"reset\":\"%s\","
-        "\"provisioned\":%s,\"ssid\":\"%s\",\"net\":\"%s\","
         "\"psram\":%lu,\"flash\":%lu,\"heap\":%lu,\"heap_total\":%lu,"
         "\"temp_crit_c\":85,\"rx\":%lu,\"rx_rescued\":%lu,"
         "\"ota\":\"%s\","
@@ -325,8 +320,6 @@ static void send_hello(void)
         running ? running->label : "unknown",
         HW_BOARD_ID, HW_BOARD_NAME,
         s_mac, s_boot_id, reset_reason_str(),
-        s_creds.have_wifi ? "true" : "false", s_creds.ssid,
-        hw_net_state_str(),
         (unsigned long)hw_sensors_psram_size(),
         (unsigned long)hw_sensors_flash_size(),
         (unsigned long)hw_sensors_heap_free(),
@@ -467,55 +460,6 @@ static void on_frame(const char *type, const char *json)
         return;
     }
 
-    /* Credentials arrive over the cable and are never compiled in. The harness
-       image is a public artefact — anyone can download it and write it to
-       their own board — so it contains nothing per-person. */
-    if (strcmp(type, "prov") == 0) {
-        char ssid[33] = {0}, psk[65] = {0}, server[128] = {0};
-
-        if (!hw_json_str(json, "ssid", ssid, sizeof(ssid)) || !ssid[0]) {
-            hw_proto_sendf("prov_ack", "\"ok\":false,\"err\":\"no ssid\"");
-            return;
-        }
-        hw_json_str(json, "psk", psk, sizeof(psk));
-        hw_json_str(json, "server", server, sizeof(server));
-
-        const esp_err_t err = hw_prov_save_wifi(ssid, psk, server);
-
-        /* Read back out of flash rather than echoed from the request. A write
-           that silently failed would otherwise be confirmed with the very
-           bytes that never landed, which is a success message for a board
-           that will come up unprovisioned. What is quoted back is what the
-           board will actually use on its next boot.
-
-           The passphrase is not among it. Confirming a secret by transmitting
-           it is a poor trade for a fact the host already knows; whether one is
-           stored at all is the part worth reporting. */
-        hw_prov_load(&s_creds);
-
-        hw_proto_sendf("prov_ack",
-            "\"ok\":%s,\"err\":\"%s\",\"ssid\":\"%s\",\"server\":\"%s\","
-            "\"has_psk\":%s",
-            err == ESP_OK ? "true" : "false",
-            err == ESP_OK ? "" : esp_err_to_name(err),
-            s_creds.ssid, s_creds.server,
-            psk[0] ? "true" : "false");
-
-        /* Joining now rather than at the next boot. A board that has to be
-           power-cycled to use what it was just told is one whose provisioning
-           cannot be observed from the screen that did it. */
-        if (err == ESP_OK && s_creds.have_wifi) {
-            hw_net_start(s_creds.ssid, psk);
-        }
-        return;
-    }
-
-    if (strcmp(type, "erase") == 0) {
-        esp_err_t err = hw_prov_erase();
-        hw_proto_sendf("prov_ack", "\"ok\":%s,\"erased\":true",
-                       err == ESP_OK ? "true" : "false");
-        return;
-    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -570,31 +514,22 @@ static void beat_task(void *arg)
         float fps = 0.0f;
         const bool have_fps = hw_camera_fps(&fps);
 
-        /* Absent on every board that is not associated, which is most of them
-           most of the time. Reporting 0 dBm instead would draw a full-strength
-           meter for a board with no radio. */
-        int rssi = 0;
-        const bool have_rssi = hw_net_rssi(&rssi);
-
         char opt[96] = {0};
         int used = opt_f(opt, sizeof opt, 0, "temp_c", have_temp, temp);
-        used = opt_f(opt, sizeof opt, used, "fps", have_fps, fps);
-        opt_d(opt, sizeof opt, used, "rssi", have_rssi, rssi);
+        opt_f(opt, sizeof opt, used, "fps", have_fps, fps);
 
         char app[400] = {0};
         hw_app_beat_json(app, sizeof app);
 
         hw_proto_sendf("beat",
             "\"uptime_s\":%.2f,\"heap_free\":%lu,\"psram_free\":%lu,"
-            "\"psram_largest\":%lu,\"cpu_mhz\":%d,\"boot_id\":\"%s\","
-            "\"net\":\"%s\",%s%s",
+            "\"psram_largest\":%lu,\"cpu_mhz\":%d,\"boot_id\":\"%s\",%s%s",
             (double)esp_timer_get_time() / 1000000.0,
             (unsigned long)hw_sensors_heap_free(),
             (unsigned long)hw_sensors_psram_free(),
             (unsigned long)hw_sensors_psram_largest(),
             hw_sensors_cpu_mhz(),
             s_boot_id,
-            hw_net_state_str(),
             app,
             opt);
 
@@ -689,10 +624,6 @@ void app_main(void)
        and everything else takes time the trial does not have. */
     confirm_image();
 
-    /* 1. Storage. */
-    esp_err_t err = hw_prov_init();
-    if (err != ESP_OK) ESP_LOGE(TAG, "nvs unavailable: %s", esp_err_to_name(err));
-
     /* The request mailbox must exist before the RX task can accept a cfg
        frame. This allocates no camera resource and makes no sensor call. */
     hw_camera_init();
@@ -703,6 +634,10 @@ void app_main(void)
        never to have. If the channel itself cannot be opened there is nowhere
        to report it, so the log is all that is left and the board carries on
        doing whatever it still can. */
+    /* 1. Storage, which holds only the crash counters now. */
+    esp_err_t err = hw_prov_init();
+    if (err != ESP_OK) ESP_LOGE(TAG, "nvs unavailable: %s", esp_err_to_name(err));
+
     err = hw_proto_init(on_frame);
     if (err != ESP_OK) ESP_LOGE(TAG, "serial channel unavailable: %s", esp_err_to_name(err));
 
@@ -711,7 +646,6 @@ void app_main(void)
     read_mac();
     read_build();
     hw_sensors_init();
-    hw_prov_load(&s_creds);
     hw_app_init();
 
     ESP_LOGI(TAG, "openhardware %s (%s) on %s", s_fw, s_sha, HW_BOARD_NAME);
@@ -736,22 +670,4 @@ void app_main(void)
        image encoder writes through file-scope buffers precisely so this number
        does not have to grow with the frame size. */
     xTaskCreate(camera_task, "hw_cam", 6144, NULL, 3, NULL);
-
-    /* The radio, last and optional.
-     *
-     * A board with no credentials stays exactly as observable as one with
-     * them: everything above this line runs either way, and nothing above it
-     * waits on anything below. Joining is started rather than waited for —
-     * association takes as long as the network takes, and app_main blocking on
-     * it would hold up nothing useful while making a slow router look like a
-     * hung board.
-     *
-     * A failure to start the radio is reported and then ignored, on purpose.
-     * No network is a serviceable condition; giving up the cable over it would
-     * not be. */
-    if (s_creds.have_wifi) {
-        hw_net_start(s_creds.ssid, s_creds.psk);
-    } else {
-        ESP_LOGI(TAG, "no network credentials stored; reporting over USB only");
-    }
 }

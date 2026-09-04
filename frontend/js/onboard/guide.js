@@ -17,18 +17,122 @@
    and without a board.
    ========================================================================== */
 
+/**
+ * What the board is running, said in terms somebody can act on.
+ *
+ * This replaces a sentence that was technically true and practically useless:
+ * "this board is running 0.14.1, the baseline is 0.14.1, and their hashes
+ * differ". Two identical version numbers and a hash mismatch describe the
+ * ordinary state of a board an agent has been compiling for — it is running an
+ * application built on top of that harness — and reporting it as a discrepancy
+ * invited people to re-flash a board that was working perfectly.
+ *
+ * The distinction that matters is not whether the bytes differ. It is:
+ *
+ *   running    the published baseline exactly
+ *   app        an application built on this harness — keep it
+ *   build      some other build of this same harness — keep it
+ *   outdated   a different harness version — writing the baseline is the answer
+ *   unknown    firmware this page cannot read, or silence
+ *
+ * `recommend` is 'continue' or 'flash', and it is what decides which button
+ * leads. Everything here is derived from what the board reported and what the
+ * page publishes; nothing is guessed.
+ *
+ * @returns {{kind, headline, note, recommend, app, firmware, baseline}}
+ */
+export function describeRunning(state) {
+  const hello = state?.hello ?? null;
+  const found = state?.found ?? null;
+  const pub = state?.published ?? null;
+  const baseline = pub?.version || null;
+
+  if (!hello && !found?.known) {
+    const lines = found?.lines || 0;
+    return {
+      kind: 'unknown',
+      firmware: null, app: null, baseline,
+      short: lines ? `${lines} lines, none recognised` : 'no output at all',
+      headline: lines
+        ? `The board sent ${lines} lines of output and none of them were recognised.`
+        : 'The port is open and the board has sent nothing at all.',
+      note: lines
+        ? 'It is running something this page cannot read. Whatever it said is on the wire beside this.'
+        : 'A board that has never been written to sits in its bootloader and says nothing, which looks exactly like this.',
+      recommend: 'flash',
+    };
+  }
+
+  /* During the decision the identity has been read but not yet adopted, so
+     what is known about the board lives on `found`. Both are consulted, and
+     neither is invented. */
+  const firmware = hello?.fw || found?.fw || null;
+  const reported = hello?.app || found?.app || null;
+  const appName = reported?.name || null;
+  const appVer = reported?.ver || reported?.version || null;
+  /* The baseline's own application is called `default`; anything else is
+     something that was built and flashed on purpose. */
+  const isApp = !!appName && appName !== 'default';
+  const app = isApp ? { name: appName, version: appVer || null } : null;
+  const shown = app ? `${app.name}${app.version ? ` ${app.version}` : ''}` : null;
+
+  if (pub?.action === 'same') {
+    return {
+      kind: 'baseline', firmware, app, baseline,
+      short: `baseline ${firmware || baseline}`,
+      headline: `This board is running the known-safe baseline, ${firmware || baseline}.`,
+      note: 'It is the image this page publishes, byte for byte. There is nothing to fix.',
+      recommend: 'continue',
+    };
+  }
+
+  if (pub?.action === 'outdated') {
+    return {
+      kind: 'outdated', firmware, app, baseline,
+      short: `harness ${firmware || '?'} · baseline ${baseline}`,
+      headline: `This board is running harness ${firmware || 'an older version'}, and the baseline is now ${baseline}.`,
+      note: 'Writing the baseline brings it up to the version this page was built against.',
+      recommend: 'flash',
+    };
+  }
+
+  if (isApp) {
+    return {
+      kind: 'app', firmware, app, baseline,
+      short: `${shown} on ${firmware || baseline}`,
+      headline: `This board is running the application ${shown}, built on harness ${firmware || baseline}.`,
+      note: 'That is a build somebody flashed on purpose, and keeping it is the normal choice.',
+      recommend: 'continue',
+    };
+  }
+
+  return {
+    kind: 'build', firmware, app, baseline,
+    short: `a build of ${firmware || baseline}`,
+    headline: `This board is running a build based on harness ${firmware || baseline}.`,
+    note: 'It is the same harness version this page publishes, compiled from different source — '
+        + 'which is what a board that has been built for looks like. Keeping it is the normal choice.',
+    recommend: 'continue',
+  };
+}
+
 /** The flow, once, as sentences a model can plan against. */
 export const HOW_IT_WORKS = [
-  'Bring-up runs six rungs: connect, flash, boot, identify, network, telemetry. '
-    + 'Two of them stop and ask, and the buttons on the page answer them.',
+  'Bring-up runs five rungs: connect, flash, boot, identify, telemetry. Only one '
+    + 'of them stops and asks, and the buttons on the page answer it. Everything '
+    + 'runs over the USB cable, and there is nothing else to set up.',
   'Only a person can choose a serial port. The picker is a native browser dialog '
-    + 'that no tool or script can drive.',
-  'The flash decision compares the firmware the board reports with the image this '
-    + 'page publishes. "Continue with it" keeps what is on the board and writes '
-    + 'nothing. "Restore baseline" writes the known-safe factory image; stored data is '
-    + 'erased only when that option is selected.',
-  'The network fork is optional. Telemetry runs over the cable either way, so '
-    + '"Skip — use the cable" is a complete answer.',
+    + 'that no tool or script can drive. It is the one step you cannot do '
+    + 'yourself: ask for it, then wait.',
+  'The flash decision says what the board is running. A board running an '
+    + 'application, or another build of the same harness version, is working '
+    + 'normally: "Continue with it" keeps it and writes nothing, and is the '
+    + 'normal answer. "Restore baseline" writes the known-safe image, and leads '
+    + 'only when the board runs an older harness or nothing readable.',
+  'Once a board is linked the work is: read get_app_source for the API, compile '
+    + 'with build_firmware, poll get_build, then flash_image with that build id. '
+    + 'Only flash_image and restore_baseline touch the board, and both wait for a '
+    + 'person to press Approve.',
   'Write tools register once the board is linked. Until then get_board reports '
     + 'link "offline" and the write tools do not exist.',
   'With no hardware, open the page with ?sim: a simulated board runs the same '
@@ -45,7 +149,8 @@ export function describeBringUp(state) {
   const rungs = Object.values(state.rungs || {}).map(r => ({
     id: r.id, title: r.title, state: r.state, detail: r.detail || '',
   }));
-  const waitingOn = waiting(state);
+  const running = describeRunning(state);
+  const waitingOn = waiting(state, running);
 
   return {
     phase: state.phase,
@@ -56,9 +161,13 @@ export function describeBringUp(state) {
     board: {
       firmware: state.hello?.fw ?? state.found?.fw ?? null,
       published: state.published?.version ?? null,
-      /** 'same' | 'differs' | null — how the two compare, when both are known. */
+      /** 'same' | 'differs' | 'outdated' | 'unknown' — the raw comparison. */
       comparison: state.published?.action ?? null,
-      network: state.net ?? null,
+      /** The same thing said usefully: what it runs, and what to do about it. */
+      running: running.kind,
+      runningSays: running.headline,
+      recommend: running.recommend,
+      app: running.app,
     },
     fault: state.fault
       ? { code: state.fault.code, observed: state.fault.observed, causes: state.fault.causes,
@@ -77,7 +186,7 @@ export function describeBringUp(state) {
  * firmware, typing credentials. The others write nothing and keep the flow
  * moving, and an agent that can reach the page may press them.
  */
-function waiting(s) {
+function waiting(s, running) {
   const opt = (label, does, needsPerson) => ({ label, does, needsPerson });
 
   if (s.phase === 'done') {
@@ -98,52 +207,33 @@ function waiting(s) {
     return { who: 'person', what: s.fault.next, options };
   }
 
-  if (s.phase === 'decide' && s.rungs?.network?.state === 'ask') {
-    return {
-      who: 'person',
-      what: 'Choose whether the board joins a Wi-Fi network. Telemetry runs over the cable '
-          + 'either way, so "Skip — use the cable" is the normal answer.',
-      options: [
-        opt('Skip — use the cable', 'carries on over the cable; a complete answer', false),
-        opt('Join this network',
-          'stores the credentials typed into the form and asks the board to join; a person types them', true),
-      ],
-    };
-  }
-
   if (s.phase === 'decide') {
-    const fw = s.hello?.fw || s.found?.fw || null;
-    const version = s.published?.version || null;
+    const r = running || describeRunning(s);
+    const version = r.baseline;
+    const restore = version ? `Restore baseline ${version}` : 'Restore baseline';
+    const write = version ? `Write baseline ${version}` : 'Write baseline';
 
-    if (s.found?.known) {
-      const cmp = s.published?.action === 'same'
-        ? ' It matches the known-safe baseline.'
-        : s.published?.action === 'differs' && version
-          ? ` The known-safe baseline is ${version}, built from different source.`
-          : '';
+    if (r.kind === 'unknown') {
       return {
         who: 'person',
-        what: `The board is already running ${fw || 'firmware this page can read'}.${cmp} `
-            + '"Continue with it" keeps it and writes nothing; that is the normal choice.',
+        what: `${r.headline} ${r.note} Writing the known-safe baseline is the answer here.`,
         options: [
-          opt('Continue with it', `keeps ${fw || 'what is on the board'} and writes nothing`, false),
-          opt(version ? `Restore baseline ${version}` : 'Restore baseline',
-            'writes the known-safe baseline over the board; a person decides', true),
+          opt(write, 'writes the known-safe baseline; a person decides', true),
+          opt('Listen anyway', 'keeps listening without writing', false),
         ],
       };
     }
 
-    const lines = s.found?.lines || 0;
+    const lead = r.recommend === 'continue'
+      ? '"Continue with it" keeps what is on the board and writes nothing, and is the normal answer here.'
+      : `"${restore}" is the answer here. "Continue with it" keeps what is on the board and writes nothing.`;
+
     return {
       who: 'person',
-      what: lines
-        ? `The board sent ${lines} lines of output and none were recognised. Writing the `
-          + 'known-safe baseline replaces whatever it runs; listening keeps watching it.'
-        : 'The port is open and the board has sent nothing; it may be sitting in its '
-          + 'bootloader. Writing the known-safe baseline is the usual answer.',
+      what: `${r.headline} ${r.note} ${lead}`,
       options: [
-        opt(version ? `Write baseline ${version}` : 'Write baseline', 'writes the known-safe baseline; a person decides', true),
-        opt('Listen anyway', 'keeps listening without writing', false),
+        opt('Continue with it', `keeps ${r.firmware || 'what is on the board'} and writes nothing`, false),
+        opt(restore, 'writes the known-safe baseline over the board; a person decides', true),
       ],
     };
   }

@@ -157,16 +157,6 @@ function listen(scene = '') {
      && S.state.telemetry.limits.heapTotal === 327680,
      JSON.stringify(S.state.telemetry.limits));
 
-  /* Absent, not zero — and the difference is the whole rule. Zero dBm is an
-     extraordinarily strong signal and sits inside the plausible range, so a
-     panel handed it draws a full meter for a board with no radio associated.
-     The firmware omits the field; a simulator that sent zero would be held to
-     a weaker contract than the thing it stands in for, and would keep passing
-     after the real path had broken. */
-  ok('no signal strength is reported for a board with no radio',
-     S.state.telemetry.latest.rssi === null,
-     `rssi came through as ${JSON.stringify(S.state.telemetry.latest.rssi)}`);
-
   await wait(1700);
   ok('what is attached is discovered, not assumed',
      S.state.peripherals.known === true);
@@ -361,6 +351,60 @@ function listen(scene = '') {
   feed.handleFrame({ t: 'caps', camera: { state: 'ok', sensor: 'OV2640' }, i2c: [], streaming: true });
   ok('a board that answers "still here" is believed',
      S.state.peripherals.camera.state === 'ok');
+  feed.stop();
+}
+
+/* ------------------------------------------------------------------------ */
+/* ACTIVE is a claim about the board, and only the board settles it          */
+/* ------------------------------------------------------------------------ */
+
+{
+  const feed = createFeed({ source: 'usb' });
+  const hello = sha => ({
+    t: 'hello', proto: 1, fw: '0.14.1', sha, slot: 'ota_0',
+    board: 'xiao_esp32s3', mac: '02:00:00:00:00:11', boot_id: 'b1', net: 'offline',
+  });
+  const rows = () => Object.fromEntries(S.state.firmware.map(f => [f.buildId, f.outcome]));
+
+  S.applyFirmware([
+    { buildId: 'one', version: '1.0', sha: 'aaaa1111', outcome: 'built', builtAt: 1 },
+    { buildId: 'two', version: '1.1', sha: 'bbbb2222', outcome: 'built', builtAt: 2 },
+    { buildId: 'bad', version: '1.2', sha: 'cccc3333', outcome: 'failed', builtAt: 3 },
+  ]);
+
+  feed.handleFrame(hello('aaaa1111'));
+  ok('the build whose image the board is running is the active one',
+     rows().one === 'active', JSON.stringify(rows()));
+  ok('a build that has never been on the board is still just built',
+     rows().two === 'built', JSON.stringify(rows()));
+  ok('and a build that failed keeps saying so',
+     rows().bad === 'failed', JSON.stringify(rows()));
+
+  /* The board is flashed with the other candidate. */
+  feed.handleFrame(hello('bbbb2222'));
+  ok('flashing another build moves ACTIVE to it', rows().two === 'active', JSON.stringify(rows()));
+  ok('and the one it replaced stops claiming to be active',
+     rows().one === 'superseded', JSON.stringify(rows()));
+
+  /* The baseline is restored: the board now runs an image no build produced.
+     This is the case that used to leave a stale ACTIVE on screen for hours. */
+  feed.handleFrame(hello('ffff9999'));
+  ok('restoring an image no build produced leaves nothing claiming ACTIVE',
+     !S.state.firmware.some(f => f.outcome === 'active'), JSON.stringify(rows()));
+  ok('and the build that had been running is marked as replaced, not as failed',
+     rows().two === 'superseded', JSON.stringify(rows()));
+
+  /* Flashing it again brings it back, rather than leaving it superseded for
+     good. */
+  feed.handleFrame(hello('aaaa1111'));
+  ok('a build put back on the board is active again', rows().one === 'active', JSON.stringify(rows()));
+
+  /* A board that will not say what it is running is no evidence at all. */
+  const before = JSON.stringify(rows());
+  feed.handleFrame({ ...hello('aaaa1111'), sha: '' });
+  ok('a board that reports no image hash changes nothing',
+     JSON.stringify(rows()) === before, `${before} -> ${JSON.stringify(rows())}`);
+
   feed.stop();
 }
 
