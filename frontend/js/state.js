@@ -252,8 +252,38 @@ export const state = {
      * the moment it is asked for, through the operator's approval, to the boot
      * verdict — so the Flash buttons and the tool refuse a second one while it
      * runs. `{ buildId }`, or `{ baseline: true }` for a baseline restore.
+     *
+     * While the write runs it also carries `written` and `total` bytes as the
+     * flasher reports them, and `stage`, one word for the part of the flash
+     * that has no byte count: fetching the image, waiting for the chip,
+     * watching the candidate boot. A percentage is only shown where bytes are
+     * actually being counted; the rest says what it is doing instead of
+     * animating a number nobody measured.
      */
     flashing: null,
+    /**
+     * How the last flash ended, so the row that was written says so instead
+     * of leaving somebody to infer it: `{ buildId, ok, reason }`. Kept until
+     * the next flash starts, because the moment it finishes is exactly when
+     * somebody looks away.
+     */
+    lastFlash: null,
+    /**
+     * The source of one build, opened for reading. Written firmware is the
+     * one thing on this page nobody can inspect after the fact, so it is
+     * readable before: from the image row's menu, and from the approval gate
+     * itself, where the question is whether to write this code to a board.
+     *
+     * `{ buildId, files: { name: text } | null, error, loading, from }`.
+     * `from` is 'row' or 'gate' — the same review drawn where it was asked
+     * for. One at a time, because two open listings of different code beside
+     * one Approve button is the way to approve the wrong one.
+     */
+    review: null,
+    /** The image row whose overflow menu is open, or null. */
+    menuFor: null,
+    /** The image row whose Delete is waiting to be confirmed, or null. */
+    confirmDelete: null,
     agent: { available: null, seen: false, tool: null, calls: 0, lastAt: 0, quiet: false, tools: [] },
   },
 };

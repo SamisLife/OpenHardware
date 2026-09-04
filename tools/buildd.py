@@ -11,8 +11,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -33,6 +35,28 @@ IDF_IMAGE = "espressif/idf:v5.3"
 BUILD_VOLUME = "openhardware-build"
 
 NAME_RE = re.compile(r"^[a-z0-9_]+\.(?:c|h)$")
+
+
+def remove_tree(path: Path) -> None:
+    """Remove a directory on a filesystem that says no the first time.
+
+    The same retry tools/baseline.py needs, and for the same reason: a synced
+    folder holds files open for moments at a time and marks some of them
+    read-only, and either answer makes rmtree raise on Windows. Clearing the
+    attribute and trying again a few times is what it takes.
+    """
+    def clear(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    for attempt in range(5):
+        try:
+            shutil.rmtree(path, onerror=clear)
+            return
+        except OSError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2)
 FORBIDDEN_I2C_RE = re.compile(r"i2c_master\.h|i2c_new_master_bus|i2c_master_")
 DIAGNOSTIC_RE = re.compile(
     r"^(.+?):(\d+):(\d+): (fatal error|error|warning|note): (.*)$"
@@ -347,6 +371,35 @@ class Builds:
         with self.lock:
             return self.records.get(build_id)
 
+    def remove(self, build_id: str):
+        """Forget one build and delete what it left on disk.
+
+        A candidate is immutable, so removing it is the only way it ever
+        changes; the record and the artifact go together, because a record
+        pointing at images that are gone is worse than neither. A build that
+        is still compiling is refused rather than removed out from under the
+        compiler.
+        """
+        with self.lock:
+            record = self.records.get(build_id)
+            if not record:
+                return {"ok": False, "error": "build not found", "status": 404}
+            if record.get("status") == "building":
+                return {"ok": False, "error": "that build is still running", "status": 409}
+            self.records.pop(build_id, None)
+            if build_id in self.order:
+                self.order.remove(build_id)
+
+        directory = ARTIFACTS / build_id
+        try:
+            if directory.exists():
+                remove_tree(directory)
+        except OSError as error:
+            # The record is already gone, so the page will not offer it again.
+            # What is left on disk is reported rather than hidden.
+            return {"ok": True, "id": build_id, "warning": f"some files could not be deleted: {error}"}
+        return {"ok": True, "id": build_id}
+
     def start(self, files: dict[str, str], note: str = "", clean: bool = False):
         with self.lock:
             if self.busy:
@@ -497,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def cors(self):
         self.send_header("Access-Control-Allow-Origin", allowed_origin(self.headers.get("Origin")))
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Vary", "Origin")
 
@@ -560,6 +613,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200 if files else 404, {"files": files} if files else {"ok": False, "error": "artifact source not found"})
             return
         self.send_json(404, {"ok": False, "error": "not found"})
+
+    def do_DELETE(self):
+        """Remove one build: its record and the images and source it left.
+
+        Only a person reaches this — the page's own menu — because it destroys
+        the one copy of a candidate that exists. No tool calls it: an agent
+        that could delete the artefact it just built could erase the evidence
+        of what it flashed.
+        """
+        match = re.fullmatch(r"/build/([a-z0-9]+)", urlparse(self.path).path)
+        if not match:
+            self.send_json(404, {"ok": False, "error": "not found"})
+            return
+        result = BUILDS.remove(match.group(1))
+        self.send_json(result.pop("status", 200), result)
 
     def do_POST(self):
         if urlparse(self.path).path != "/build":

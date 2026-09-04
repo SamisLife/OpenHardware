@@ -30,6 +30,9 @@ const fetchImpl = async (url, options = {}) => {
   if (pathname === '/app') return response({ api: 'header', files: { 'app.c': 'source' } });
   if (pathname === '/build' && options.method === 'POST') return response({ id: 'b1', status: 'building' }, 202);
   if (pathname === '/builds') return response({ builds: [{ id: 'b1', status: 'built' }] });
+  if (pathname === '/source/b1') return response({ files: { 'app.c': 'void app_setup(void) {}' } });
+  if (pathname === '/build/b9' && options.method === 'DELETE') return response({ ok: true, id: 'b9' });
+  if (pathname === '/build/busy' && options.method === 'DELETE') return response({ ok: false, error: 'that build is still running' }, 409);
   if (pathname === '/build/b1') {
     polls++;
     return response(polls < 2
@@ -52,6 +55,20 @@ ok('the note and source set cross the boundary', posted.note === 'candidate' && 
 const built = await client.waitFor('b1', { untilMs: 2500 });
 ok('polling stops when the daemon finishes', built.status === 'built' && built.image.elf_sha8 === '1234abcd');
 ok('omitting an id returns the latest build', (await client.get()).id === 'b1');
+
+/* The stored source of one immutable build, which is what a person reads
+   before approving a flash and what an agent quotes when asking for one. */
+ok('the stored source of one build is fetched by id',
+   (await client.source('b1')).files['app.c'] === 'void app_setup(void) {}');
+
+/* Deleting a build is a DELETE on that build, not a POST with a verb in it. */
+const removed = await client.remove('b9');
+const deleteCall = calls.find(call => call.options.method === 'DELETE');
+ok('a build is deleted by method, at its own address',
+   removed.ok === true && new URL(deleteCall.url).pathname === '/build/b9');
+const refused = await client.remove('busy');
+ok('a refusal to delete comes back as data, not a throw',
+   refused.ok === false && /still running/.test(refused.error), JSON.stringify(refused));
 
 const offline = createBuildClient({ fetchImpl: async () => { throw new Error('offline'); } });
 const failure = await offline.health();

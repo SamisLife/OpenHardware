@@ -21,6 +21,7 @@
    ========================================================================== */
 
 import { dur, clock, shortKey, NIL } from '../format.js';
+import { sourceView } from './firmware.js';
 
 const STATUS_LABEL = {
   running:   'RUNNING',
@@ -38,11 +39,18 @@ const STEP_ORDER = [
 let el = {};
 let handlers = {};
 let gateWasPending = false;
+/* The open source listing, as of the last paint. Held here rather than
+   threaded through gateBlock's callers, because an attempt's gate is drawn
+   from inside a loop that has the attempt and not the page. */
+let review = null;
+/** The gate markup as this file last wrote it. See renderGate. */
+let lastGate = null;
 /** n -> { node, sig } so an unchanged attempt is never rebuilt. */
 const built = new Map();
 
 export function mountAgent(root, opts = {}) {
   handlers = opts;
+  lastGate = null;
   el = {
     status:      root.querySelector('[data-agent=status]'),
     order:       root.querySelector('[data-agent=order]'),
@@ -70,14 +78,29 @@ export function mountAgent(root, opts = {}) {
  */
 export function renderGate(state) {
   if (!el.gate) return;
+  review = state.ui?.review || null;
   const g = state.gate;
   el.gate.hidden = !g;
-  if (!g) { el.gate.innerHTML = ''; gateWasPending = false; return; }
+  if (!g) { el.gate.innerHTML = ''; lastGate = null; gateWasPending = false; return; }
 
-  el.gate.innerHTML = gateBlock({ gate: g }, g.requestedBy === 'agent' ? 'an agent asked' : null);
+  /* Rebuilt only when it actually reads differently. The gate repaints on
+     every ui change now, and replacing the markup underneath an open source
+     listing would throw away where somebody had scrolled to in it. */
+  const html = gateBlock({ gate: g }, g.requestedBy === 'agent' ? 'an agent asked' : null);
+  /* Against what was written, not against what the DOM gives back: the two
+     differ in ways that have nothing to do with the content, and rebuilding
+     the block would drop the source listing back to its first line while
+     somebody is reading it. */
+  if (lastGate === html) { gateWasPending = g.state === 'pending'; return; }
+  el.gate.innerHTML = html;
+  lastGate = html;
   if (g.state === 'pending') {
     el.gate.querySelector('[data-gate=approve]')?.addEventListener('click', () => handlers.onApprove?.(g));
     el.gate.querySelector('[data-gate=hold]')?.addEventListener('click', () => handlers.onHold?.(g));
+    el.gate.querySelector('[data-gate=review]')?.addEventListener('click', () => handlers.onReviewGate?.(g));
+    el.gate.querySelector('[data-fwact=close-review]')?.addEventListener('click', () => handlers.onCloseReview?.());
+    /* Scrolled into view when it first appears, and not again: a listing
+       opened underneath it must not yank the page while somebody is reading. */
     if (!gateWasPending) el.gate.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   }
   gateWasPending = g.state === 'pending';
@@ -119,6 +142,7 @@ export function renderWorkOrder(state) {
 export function renderAttempts(state) {
   const list = el.list;
   const attempts = state.attempts;
+  review = state.ui?.review || null;
 
   el.count.textContent = attempts.length
     ? `${attempts.length} attempt${attempts.length === 1 ? '' : 's'}`
@@ -180,6 +204,10 @@ function paintAttempt(node, a) {
       ?.addEventListener('click', () => handlers.onApprove(a));
     node.querySelector('[data-gate=hold]')
       ?.addEventListener('click', () => handlers.onHold?.(a));
+    node.querySelector('[data-gate=review]')
+      ?.addEventListener('click', () => handlers.onReviewGate?.(a.gate));
+    node.querySelector('[data-fwact=close-review]')
+      ?.addEventListener('click', () => handlers.onCloseReview?.());
   }
 }
 
@@ -238,6 +266,12 @@ function gateBlock(a, who = null) {
       <span class="gate__by">nothing was written · ${clock(g.answeredAt)}</span>
     </div>`;
   }
+  /* A gate that will write code to a board offers that code for reading,
+     right here, before the button that writes it. Reviewing is not a third
+     answer: it changes nothing and can be opened and closed as often as
+     somebody likes, so it sits apart from Approve and Hold. */
+  const build = g.buildId || null;
+  const open = review && review.from === 'gate' && review.buildId === build;
   return `<div class="gate" data-state="pending">
     <div class="gate__head">
       <span class="gate__mark">APPROVAL REQUIRED${who ? ` · ${esc(who)}` : ''}</span>
@@ -247,8 +281,10 @@ function gateBlock(a, who = null) {
     <div class="gate__actions">
       <button class="btn btn--primary" data-gate="approve">Approve</button>
       <button class="btn" data-gate="hold">Hold</button>
+      ${build ? `<button class="btn gate__review" data-gate="review">${open ? 'Hide source' : 'Review source'}</button>` : ''}
       <span class="gate__policy" data-gate="policy">${esc(g.policy || '')}</span>
     </div>
+    ${open ? sourceView(review) : ''}
   </div>`;
 }
 

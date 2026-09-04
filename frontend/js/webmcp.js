@@ -312,11 +312,33 @@ function readTools(fx) {
         'Read the application API header, mutable draft, and immutable minimal baseline from the local '
         + 'build daemon. Program only against `api`; `files` is the whole replaceable app that '
         + 'will be used as the next draft, while `baseline` is the recovery starting point. The fixed harness is not editable. Also reports whether the daemon is '
-        + 'reachable or busy.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        + 'reachable or busy.'
+        + ' Pass buildId to read the exact source one immutable build was compiled from, which is '
+        + 'what to quote when asking a person to approve flashing it.',
+      inputSchema: {
+        type: 'object',
+        properties: { buildId: { type: 'string', maxLength: 40 } },
+        additionalProperties: false,
+      },
       annotations: { readOnlyHint: true },
-      execute: async () => {
+      execute: async input => {
         if (!fx.build) return { ok: false, error: 'no build client is configured' };
+        /* One build's stored source, on its own: the caller asked about that
+           artefact, and returning the draft beside it invites quoting the
+           wrong code to the person deciding. */
+        const wanted = String(input?.buildId || '').trim();
+        if (wanted) {
+          const stored = await fx.build.source(wanted);
+          if (!stored?.ok) return { ok: false, error: stored?.error || `no stored source for build ${wanted}` };
+          const record = await fx.build.get(wanted);
+          return {
+            ok: true,
+            buildId: wanted,
+            files: stored.files,
+            app: record?.ok ? record.app || null : null,
+            note: record?.ok ? record.note || null : null,
+          };
+        }
         const [health, app, builds] = await Promise.all([fx.build.health(), fx.build.app(), fx.build.list()]);
         if (!health.ok || !app.ok) {
           return {
@@ -876,6 +898,10 @@ function writeTools(fx) {
         + 'press Hold or do not answer before you cancel. Nothing touches the board until '
         + 'approval. The immutable buildId prevents a newer build from replacing the approved image. '
         + 'The factory baseline is not overwritten.'
+        + ' Before calling this, read the code you are asking to run: call get_app_source with this '
+        + 'buildId, and tell the person in your message what the app does and anything about it they '
+        + 'should look at. Say that they can read it themselves with Review source, on the approval '
+        + 'prompt and in the Images list. Do not describe source you have not read.'
         + ' Fails with "no board is linked" until a board is linked; the next field of the reply, and get_bring_up, say what a person must do.',
       inputSchema: {
         type: 'object', required: ['buildId'],
@@ -1114,16 +1140,21 @@ export async function flashBuild(fx, buildId, { signal = null, requestedBy = 'ag
   upsertAttempt({ n: attempt.n, status: 'gated', steps: [step('running', 'waiting for operator approval')] });
 
   const who = requestedBy === 'operator' ? 'The operator' : 'An agent';
-  applyUi({ flashing: { buildId } });
+  /* Cleared as this one starts: the row is about to report on this attempt,
+     and last time's verdict beside a running flash is the wrong answer to the
+     question somebody is asking. */
+  applyUi({ flashing: { buildId, written: null, total: null, stage: 'waiting' }, lastFlash: null });
   let outcome;
   try {
   outcome = await gated(fx, {
     action: `Write build ${buildId} · ${app.name || 'app'} ${app.version || ''} to the inactive OTA slot`,
-    rationale: `${who} asked to activate one immutable candidate. The factory baseline and stored data remain untouched.`,
-    signal, requestedBy,
+    rationale: `${who} asked to activate one immutable candidate. The factory baseline and stored data remain untouched. `
+             + 'Review source shows the exact code this image was compiled from.',
+    signal, requestedBy, buildId,
   }, async () => {
     upsertAttempt({ n: attempt.n, status: 'running', steps: [step('running', 'writing inactive OTA slot')] });
     patchRow('flashing', null);
+    applyUi({ flashing: { buildId, written: null, total: null, stage: 'starting' } });
     const result = await fx.flash({ buildId, imageBase: fx.build.artifactBase(buildId) });
     const fault = result?.fault || null;
     const reply = {
@@ -1152,6 +1183,11 @@ export async function flashBuild(fx, buildId, { signal = null, requestedBy = 'ag
     else if (wroteOnly) patchRow(fault.code === 'rolled_back' ? 'rolled_back' : 'failed',
                                  fault.raw || fault.observed || 'candidate was not activated');
     else patchRow('failed', fault?.raw || fault?.observed || 'flash did not complete');
+    /* Said on the row itself, in one word, because the tag column names the
+       state of an image and not the outcome of the attempt somebody just
+       made. The reason travels with it for the failures. */
+    applyUi({ lastFlash: { buildId, ok: activated, reason: activated ? null
+      : fault?.raw || fault?.observed || 'the flash did not complete' } });
     return reply;
   });
   } finally {
@@ -1159,20 +1195,25 @@ export async function flashBuild(fx, buildId, { signal = null, requestedBy = 'ag
   }
   if (outcome?.refused) upsertAttempt({ n: attempt.n, status: 'built', verdict: 'BUILT',
     steps: [step('skipped', `operator ${outcome.refused}`)] });
-  else if (!outcome?.ok && outcome?.error) upsertAttempt({ n: attempt.n, status: 'failed', verdict: 'FLASH FAILED',
-    steps: [step('fail', outcome?.error || 'flash did not complete')] });
+  else if (!outcome?.ok && outcome?.error) {
+    upsertAttempt({ n: attempt.n, status: 'failed', verdict: 'FLASH FAILED',
+      steps: [step('fail', outcome?.error || 'flash did not complete')] });
+    applyUi({ lastFlash: { buildId, ok: false, reason: outcome.error } });
+  }
   return outcome;
 }
 
-async function gated(fx, { action, rationale, signal, requestedBy = 'agent' }, run) {
+async function gated(fx, { action, rationale, signal, requestedBy = 'agent', buildId = null }, run) {
   const policy = 'waits for the operator — nothing happens until Approve';
   let verdict;
   try {
     verdict = await requestGate({
       action, rationale, policy, timeoutMs: null, signal,
+      /* buildId travels with the gate so the page can offer that build's
+         stored source beside the button that writes it. */
       onState: st => applyGate(st === 'pending'
-        ? { state: 'pending', action, rationale, policy, requestedBy, requestedAt: Date.now() }
-        : { state: st, action, rationale, policy, requestedBy, answeredAt: Date.now() }),
+        ? { state: 'pending', action, rationale, policy, requestedBy, buildId, requestedAt: Date.now() }
+        : { state: st, action, rationale, policy, requestedBy, buildId, answeredAt: Date.now() }),
     });
   } catch (err) {
     return { ok: false, refused: 'busy', error: err.message };

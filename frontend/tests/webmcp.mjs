@@ -108,6 +108,9 @@ const fx = {
     baseline: async () => ({ ok: true, version: '0.14.0', app: { name: 'default', version: '1.0' } }),
     artifactBase: id => `/firmware/artifacts/${id}/`,
     baselineBase: '/firmware/baseline/',
+    source: async id => (id === 'gone'
+      ? { ok: false, error: 'artifact source not found' }
+      : { ok: true, files: { 'app.c': `/* ${id} */ void app_setup(void) {}` } }),
   },
   provision: async (ssid, psk) => { provisioned = { ssid, hasPsk: !!psk }; },
   manifest: async () => ({ version: '0.12.0', project: 'openhardware_harness', elf_sha8: 'abc', total_bytes: 880384, parts: [] }),
@@ -371,6 +374,38 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
 }
 
 {
+  /* The row has to be able to say how it ended, so the flash records that
+     rather than leaving somebody to read it off a tag that describes an
+     image. A success and a failure are both recorded, and the failure keeps
+     its reason. */
+  st.state.attempts = [];
+  st.applyUi({ lastFlash: null });
+  const good = { ...fx, flash: async () => ({ flashDone: true, phase: 'done', fault: null }) };
+  const p = flashBuild(good, 'ok1', { requestedBy: 'operator' });
+  await wait(20);
+  ok('a flash in flight is marked before anything is written',
+     st.state.ui.flashing?.buildId === 'ok1' && st.state.ui.lastFlash === null);
+  approvePending();
+  await p;
+  ok('a flash that lands records SUCCESS for that build',
+     st.state.ui.lastFlash?.buildId === 'ok1' && st.state.ui.lastFlash?.ok === true,
+     JSON.stringify(st.state.ui.lastFlash));
+
+  const bad = { ...fx, flash: async () => ({ flashDone: true, phase: 'fault',
+    fault: { code: 'rolled_back', raw: 'ota_0 was abandoned by the bootloader' } }) };
+  const p2 = flashBuild(bad, 'bad1', { requestedBy: 'operator' });
+  await wait(20);
+  ok('and the previous verdict is cleared while the next one runs',
+     st.state.ui.lastFlash === null, JSON.stringify(st.state.ui.lastFlash));
+  approvePending();
+  await p2;
+  ok('a flash that fails records FAIL with what went wrong',
+     st.state.ui.lastFlash?.ok === false && /abandoned/.test(st.state.ui.lastFlash?.reason || ''),
+     JSON.stringify(st.state.ui.lastFlash));
+  ok('and nothing is left marked in flight afterwards', st.state.ui.flashing === null);
+}
+
+{
   /* Only one flash at a time, whichever asked: a second while one is in flight
      is refused as busy without touching the board. */
   st.applyUi({ flashing: { buildId: 'other' } });
@@ -380,6 +415,41 @@ const WRITE = ['flash_image', 'provision_wifi', 'record_limit', 'restore_baselin
   const agentBusy = await call('flash_image', { buildId: 'human2' });
   ok('and the tool refuses it too, one path for both', agentBusy.refused === 'busy');
   st.applyUi({ flashing: null });
+}
+
+{
+  /* Reading the code before approving it. The agent gets the exact source the
+     candidate was compiled from, addressed by build id — not the draft, which
+     has moved on since. */
+  const src = await call('get_app_source', { buildId: 'b7' });
+  ok('a build id reads that build’s stored source',
+     src.ok === true && src.buildId === 'b7' && /b7/.test(src.files['app.c']), JSON.stringify(src));
+  ok('and it is that source alone, with no draft beside it to quote by mistake',
+     src.files !== undefined && src.baseline === undefined && src.api === undefined);
+
+  const missing = await call('get_app_source', { buildId: 'gone' });
+  ok('a build with no stored source is an error, never an empty listing',
+     missing.ok === false && !!missing.error, JSON.stringify(missing));
+
+  ok('flash_image tells the model to read the code first',
+     /get_app_source/.test(mc.get('flash_image').description)
+     && /Review source/.test(mc.get('flash_image').description));
+
+  /* The gate carries the build id, which is what lets the page put that
+     build’s source under the button that writes it. */
+  st.state.attempts = [];
+  const p = flashBuild(fx, 'b7', { requestedBy: 'agent' });
+  await wait(20);
+  ok('the pending gate names the build it would write', st.state.gate?.buildId === 'b7');
+  ok('and its reason points at the source', /Review source/.test(st.state.gate?.rationale || ''));
+  holdPending();
+  await p;
+}
+
+{
+  /* Deleting a build is a person’s doing, never a tool’s: an agent that
+     could delete what it just built could erase what it flashed. */
+  ok('no tool deletes a build', !mc.names().some(n => /delete|remove|discard/i.test(n)));
 }
 
 {

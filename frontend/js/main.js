@@ -66,6 +66,15 @@ let link = null;
    whether a person or an agent asked. */
 mountFirmware($('#firmware'), {
   onFlash: buildId => flashBuild(toolFx, buildId, { requestedBy: 'operator' }),
+  onMenu: buildId => applyUi({
+    menuFor: state.ui.menuFor === buildId ? null : buildId,
+    confirmDelete: null,
+  }),
+  onReview: buildId => openReview(buildId, 'row'),
+  onCloseReview: closeReview,
+  /* Two presses, and the second one is the one that says what it does. */
+  onDelete: buildId => applyUi({ confirmDelete: buildId }),
+  onDeleteConfirm: buildId => deleteBuild(buildId),
 });
 /* The two buttons answer whatever gate is pending — the loop's, before it
    commits a limit, or a tool's, before it writes to the board. Approve and
@@ -74,10 +83,42 @@ mountAgent($('#agent'), {
   onApprove: () => approvePending(),
   onHold: () => { holdPending(); announce('Gate held. Nothing was written.'); },
   onAbandon: () => abandonBuild(),
+  /* Reading the code is not answering the question: the gate stays open, and
+     a second press closes the listing again. */
+  onReviewGate: gate => {
+    const open = state.ui.review?.from === 'gate' && state.ui.review?.buildId === gate?.buildId;
+    if (open) closeReview();
+    else if (gate?.buildId) openReview(gate.buildId, 'gate');
+  },
+  onCloseReview: closeReview,
 });
 /* Nowhere to type. What an agent will find when it looks is drawn in the
    slot a form would otherwise occupy. */
 mountBelt($('#belt'));
+
+/* An open row menu is dismissed by the next click that is not in it, and by
+   Escape — the two ways every menu closes. Without this the only way out is
+   the button that opened it, which reads as stuck. Escape also closes an open
+   source listing, but never answers the gate: leaving a keystroke able to
+   refuse a flash would make Hold reachable by accident. */
+document.addEventListener('click', ev => {
+  if (!state.ui.menuFor) return;
+  if (ev.target.closest?.('.fw__menuwrap')) return;
+  applyUi({ menuFor: null, confirmDelete: null });
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape') return;
+  if (state.ui.menuFor) applyUi({ menuFor: null, confirmDelete: null });
+  else if (state.ui.review) closeReview();
+});
+/* The menu is fixed to the viewport so it can escape the table's scroll box
+   and the panel above it, which means it does not travel with the row it
+   belongs to. Anything that scrolls therefore closes it, rather than leaving
+   it pointing at a row that has moved. Capture, because the scroll that
+   matters happens inside a panel and does not bubble. */
+window.addEventListener('scroll', () => {
+  if (state.ui.menuFor) applyUi({ menuFor: null, confirmDelete: null });
+}, true);
 
 mountPeripherals($('#vitals'), {
   onCamera: on => chooseCamera(on),
@@ -227,8 +268,10 @@ subscribe((s, changed) => {
      no second copy to fall out of step. */
   if (changed.has('attempts')) { renderAttempts(s); renderMemory(s); }
   if (changed.has('memory')) renderMemory(s);
+  /* The gate repaints on a ui change too: the source listing it can hold open
+     lives in the ui slice, not in the gate itself. */
+  if (changed.has('gate') || changed.has('ui')) renderGate(s);
   if (changed.has('gate')) {
-    renderGate(s);
     renderSource(s);
     if (s.gate?.state === 'pending') announce('Agent waiting for approval.');
   }
@@ -376,6 +419,7 @@ function startOnboarding() {
   const current = new Session(driver, (s, monitor) => {
     if (gen !== generation) return;
     renderOnboard(s, monitor);
+    trackFlashProgress(s);
     if (s.phase === 'done') goLive(current);
   });
   session = current;
@@ -472,6 +516,97 @@ function goLive(s) {
 /* ------------------------------------------------------------------------ */
 /* the agent                                                                 */
 /* ------------------------------------------------------------------------ */
+
+/**
+ * Copy the flasher's own progress onto the row being written.
+ *
+ * The session already measures this — it is the same count the flash rung
+ * shows — so the image row reads it rather than estimating anything. Bytes
+ * are only reported while bytes are moving; the parts either side of the
+ * write have no denominator, and say what they are doing instead of
+ * animating a number nobody measured.
+ */
+function trackFlashProgress(s) {
+  const f = state.ui.flashing;
+  if (!f) return;
+
+  const written = Number.isFinite(s.progress?.written) ? s.progress.written : null;
+  const total = Number.isFinite(s.progress?.total) && s.progress.total > 0 ? s.progress.total : null;
+
+  let stage = f.stage || null;
+  if (written !== null && total !== null) stage = null;
+  else if (s.rungs?.boot?.state === 'active') stage = 'booting';
+  else if (s.rungs?.identify?.state === 'active') stage = 'checking';
+  else if (s.phase === 'working' || s.rungs?.flash?.state === 'active') stage = 'preparing';
+
+  if (f.written === written && f.total === total && f.stage === stage) return;
+  applyUi({ flashing: { ...f, written, total, stage } });
+}
+
+/* ------------------------------------------------------------------------ */
+/* reading a build, and getting rid of one                                   */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Open one build's stored source.
+ *
+ * The artefact's own copy, fetched from the daemon rather than read off the
+ * draft: the draft moves on with every build, and the question a reviewer is
+ * answering is what THIS image was compiled from. Drawn where it was asked
+ * for — under the image row, or inside the approval gate.
+ */
+async function openReview(buildId, from) {
+  if (!buildId) return;
+  applyUi({ review: { buildId, from, files: null, loading: true, error: null, app: null, note: null }, menuFor: null, confirmDelete: null });
+
+  const [stored, record] = await Promise.all([
+    buildClient.source(buildId),
+    buildClient.get(buildId).catch(() => null),
+  ]);
+
+  /* Another review may have been opened, or this one closed, while the fetch
+     was in flight. The answer to a question nobody is asking any more is
+     dropped rather than painted over whatever replaced it. */
+  const now = state.ui.review;
+  if (!now || now.buildId !== buildId || now.from !== from) return;
+
+  applyUi({
+    review: stored?.ok
+      ? { buildId, from, files: stored.files || {}, loading: false, error: null,
+          app: record?.ok ? record.app || null : null,
+          note: record?.ok ? record.note || null : null }
+      : { buildId, from, files: null, loading: false, app: null, note: null,
+          error: stored?.error
+            ? `the build daemon could not read that source: ${stored.error}`
+            : `no stored source for build ${buildId}` },
+  });
+}
+
+function closeReview() { applyUi({ review: null }); }
+
+/**
+ * Delete one build for good.
+ *
+ * A person only, from the menu, after a second press. The images and the
+ * source go together with the record, because a listing that offers a build
+ * whose images are gone is worse than not listing it. Refused while that
+ * build is the one being written.
+ */
+async function deleteBuild(buildId) {
+  applyUi({ menuFor: null, confirmDelete: null });
+  if (state.ui.flashing?.buildId === buildId) {
+    announce('That build is being written to the board. Nothing was deleted.');
+    return;
+  }
+  const result = await buildClient.remove(buildId);
+  if (!result?.ok) {
+    announce(`Could not delete that build: ${result?.error || 'the build daemon did not answer'}.`);
+    return;
+  }
+  if (state.ui.review?.buildId === buildId) closeReview();
+  applyFirmware(state.firmware.filter(row => row.buildId !== buildId));
+  announce(result.warning ? `Build removed from the list. ${result.warning}` : 'Build deleted.');
+}
 
 function abandonBuild() {
   applyWorkOrder(null);

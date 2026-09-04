@@ -45,6 +45,10 @@ export function createBuildClient({ base = DEFAULT_BASE, fetchImpl = fetch } = {
     baseline: () => request('/baseline'),
     list: () => request('/builds'),
     source: id => request(`/source/${encodeURIComponent(id)}`),
+    /* Deleting a candidate destroys the only copy of it. Offered to a person
+       through the page's own menu and to nothing else; there is no tool for
+       it. */
+    remove: id => request(`/build/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     start(files, note = '', clean = false) {
       return request('/build', {
         method: 'POST',

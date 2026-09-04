@@ -550,12 +550,147 @@
 
 .fw tr[data-outcome="rolled_back"] .fw__ver { color: var(--c-ink-3); text-decoration: line-through; }
 
-.fw__do { text-align: right; }
-.fw__flashing {
-  font-family: var(--f-cond);
+.fw__do { text-align: right; white-space: nowrap; }
+/* A flash in flight, and how the last one ended. Amber while it is happening,
+   because it is the one thing on the panel that is mid-change; the verdict
+   after it is grey for a success and red for a failure, on the principle that
+   a nominal result does not need colour and a failure does. */
+.fw__prog {
+  display: inline-block;
+  min-width: 4.2em;
+  text-align: right;
+  font-family: var(--f-mono);
   font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
   color: var(--c-amber);
   letter-spacing: 0.04em;
+}
+
+.fw__verdict {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  margin-right: 6px;
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  color: var(--c-ink-2);
+  background: var(--c-recess);
+}
+.fw__verdict[data-ok="false"] {
+  color: var(--c-red);
+  border-color: var(--c-red-dim);
+  background: var(--c-red-wash);
+  cursor: help;
+}
+
+/* ---- the row menu ------------------------------------------------------ */
+
+/* Anchored to the cell so the menu opens under its own button rather than at
+   the corner of the table. */
+.fw__menuwrap { position: relative; display: inline-block; margin-left: 6px; }
+
+/* Drawn as a control, not as a hint. The first version was faint ink on a
+   transparent border, which on an amber-on-brown face is very close to not
+   being there: a thing nobody can find is a thing nobody uses. It reads as a
+   button at rest and lights amber when it is the open one. */
+.fw__more {
+  font-size: var(--fs-small);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--c-ink-2);
+  background: var(--c-panel-hi);
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  padding: 3px 8px 5px;
+  cursor: pointer;
+  letter-spacing: 0.12em;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.fw__more:hover { color: var(--c-ink); background: var(--c-rule); border-color: var(--c-ink-4); }
+.fw__more[aria-expanded="true"] {
+  color: var(--c-amber);
+  border-color: var(--c-amber-dim);
+  background: var(--c-amber-wash);
+}
+
+/* Fixed to the viewport and placed from JS (see placeMenu in
+   render/firmware.js). Absolute positioning put it inside the table's scroll
+   container, which clipped it, and inside this panel's stacking, which let the
+   next panel paint over it. */
+.fwmenu {
+  position: fixed;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  background: var(--c-panel-hi);
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+.fwmenu__item {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  text-align: left;
+  white-space: nowrap;
+  color: var(--c-ink-2);
+  background: none;
+  border: 0;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.fwmenu__item:hover { background: var(--c-rule); color: var(--c-ink); }
+.fwmenu__item--danger { color: var(--c-red); }
+.fwmenu__item--danger:hover { background: var(--c-red-wash); color: var(--c-red); }
+
+/* ---- one build's source, read before it is written --------------------- */
+
+.fw__reviewrow td { padding: 0 var(--pad) 10px; border-bottom: 1px solid var(--c-rule-soft); }
+
+.src {
+  border: 1px solid var(--c-etch);
+  border-radius: var(--radius);
+  background: var(--c-panel);
+  padding: 8px 10px 10px;
+  margin-top: 6px;
+}
+.src__head { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+.src__title {
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  color: var(--c-ink-2);
+}
+.src__app { font-size: var(--fs-micro); color: var(--c-amber); }
+.src__head .btn { margin-left: auto; }
+.src__note { font-size: var(--fs-micro); color: var(--c-ink-4); padding: 2px 0 4px; }
+.src__note--bad { color: var(--c-red); }
+.src__name {
+  display: block;
+  font-family: var(--f-cond);
+  font-size: var(--fs-micro);
+  color: var(--c-ink-4);
+  letter-spacing: 0.04em;
+  padding: 4px 0 3px;
+}
+/* Long lines scroll inside the block; the panel underneath never widens. */
+.src__code {
+  margin: 0;
+  max-height: 340px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--c-recess);
+  border: 1px solid var(--c-rule-soft);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: var(--fs-micro);
+  line-height: 1.5;
+  color: var(--c-ink-2);
+  white-space: pre;
+  tab-size: 4;
 }
 
 /* ---- learned limits ---------------------------------------------------- */
@@ -847,6 +982,10 @@
 }
 
 .gate__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+
+/* Reading the code is not one of the two answers, so it sits away from them,
+   on the far side of the row. */
+.gate__review { margin-left: auto; }
 
 .gate__policy { font-family: var(--f-mono); font-size: var(--fs-micro); color: var(--c-ink-3); }
 

@@ -449,33 +449,240 @@ const { mountFirmware, renderFirmware } = await load('render/firmware.js');
   const built = { buildId: 'b1', version: '0.14.1', sha: 'abc1234def', bytes: 880384, builtAt: Date.now(), outcome: 'built' };
   const failedBuild = { buildId: 'b2', version: '0.14.1', sha: null, bytes: null, builtAt: Date.now(), outcome: 'failed' };
 
+  const flashBtn = id => new RegExp(`data-fwact="flash" data-build="${id}"`);
+  const disabledFlash = id => new RegExp(`data-fwact="flash" data-build="${id}"[^>]*disabled`);
+
   /* Linked and idle: a built image offers a Flash button; a failed build,
      with no image behind it, offers none. */
   renderFirmware({ firmware: [built, failedBuild], device: { link: 'linked' }, ui: { flashing: null } });
   ok('a built image shows an enabled Flash button',
-     /data-flash="b1"/.test(body.innerHTML) && !/data-flash="b1"[^>]*disabled/.test(body.innerHTML));
-  ok('a failed build offers nothing to flash', !/data-flash="b2"/.test(body.innerHTML));
+     flashBtn('b1').test(body.innerHTML) && !disabledFlash('b1').test(body.innerHTML));
+  ok('a failed build offers nothing to flash', !flashBtn('b2').test(body.innerHTML));
 
   /* No board: the button is present but disabled. */
   renderFirmware({ firmware: [built], device: { link: 'offline' }, ui: { flashing: null } });
-  ok('with no board linked the Flash button is disabled',
-     /data-flash="b1"[^>]*disabled/.test(body.innerHTML));
+  ok('with no board linked the Flash button is disabled', disabledFlash('b1').test(body.innerHTML));
 
-  /* A flash in flight: other rows are disabled, the one being written says so. */
-  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { flashing: { buildId: 'b1' } } });
-  ok('the row being flashed says so instead of a button',
-     /Flashing/.test(body.innerHTML) && !/data-flash="b1"/.test(body.innerHTML));
+  /* A flash in flight: other rows are disabled, the one being written reports
+     its own progress in place of the button. */
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { flashing: { buildId: 'b1', written: 440192, total: 880384 } },
+  });
+  ok('the row being flashed shows how far it has got, not a button',
+     /47%|50%/.test(body.innerHTML) && !flashBtn('b1').test(body.innerHTML), body.innerHTML.slice(0, 200));
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { flashing: { buildId: 'b1', written: 880384, total: 880384 } },
+  });
+  ok('and it reaches 100 rather than stopping short', /100%/.test(body.innerHTML));
+
+  /* The parts of a flash with no byte count say what they are doing. A
+     percentage there would be a number nobody measured. */
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { flashing: { buildId: 'b1', written: null, total: null, stage: 'booting' } },
+  });
+  ok('a stage with nothing to count is named, never given a percentage',
+     /booting/.test(body.innerHTML) && !/%/.test(body.innerHTML));
+
+  /* How the last flash ended, on the row it was written to. */
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { flashing: null, lastFlash: { buildId: 'b1', ok: true } },
+  });
+  ok('a finished flash says SUCCESS on its own row',
+     /SUCCESS/.test(body.innerHTML) && !/FAIL/.test(body.innerHTML));
+  ok('and the button comes back so it can be written again',
+     flashBtn('b1').test(body.innerHTML) && />Flash</.test(body.innerHTML));
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { flashing: null, lastFlash: { buildId: 'b1', ok: false, reason: 'the candidate was abandoned by the bootloader' } },
+  });
+  ok('a failed flash says FAIL and carries its reason',
+     /FAIL/.test(body.innerHTML) && /abandoned by the bootloader/.test(body.innerHTML));
+  ok('and the button offers to try again rather than repeating Flash',
+     />Retry</.test(body.innerHTML));
+
+  const sibling = { buildId: 'b4', version: '0.14.1', sha: 'aaaa1111', bytes: 880384, builtAt: Date.now(), outcome: 'built' };
+  renderFirmware({
+    firmware: [built, sibling], device: { link: 'linked' },
+    ui: { flashing: null, lastFlash: { buildId: 'b1', ok: true } },
+  });
+  ok('a verdict belongs to the row it was written to, and no other',
+     (body.innerHTML.match(/SUCCESS/g) || []).length === 1);
 
   const other = { buildId: 'b3', version: '0.14.1', sha: 'ffff0000', bytes: 880384, builtAt: Date.now(), outcome: 'built' };
   renderFirmware({ firmware: [other], device: { link: 'linked' }, ui: { flashing: { buildId: 'b1' } } });
-  ok('and every other Flash button is disabled while one runs',
-     /data-flash="b3"[^>]*disabled/.test(body.innerHTML));
+  ok('and every other Flash button is disabled while one runs', disabledFlash('b3').test(body.innerHTML));
 
-  /* The click routes to the handler with the build id. */
+  /* Clicks route through one delegated listener, by action and build id. */
+  const click = (fwact, build) => body._listeners.click?.[0]?.({
+    target: { dataset: { fwact, build }, disabled: false, closest(sel) { return sel === '[data-fwact]' ? this : null; } },
+  });
+
   renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { flashing: null } });
-  const btn = { dataset: { flash: 'b1' }, disabled: false, closest(sel) { return sel === '[data-flash]' ? this : null; } };
-  body._listeners.click?.[0]?.({ target: btn });
+  click('flash', 'b1');
   ok('clicking Flash asks to flash that build', asked === 'b1');
+
+  /* ---- the row menu, review and delete --------------------------------- */
+
+  ok('every build carries an overflow menu button, including a failed one',
+     /data-fwact="menu" data-build="b1"/.test(body.innerHTML));
+  renderFirmware({ firmware: [built, failedBuild], device: { link: 'linked' }, ui: {} });
+  ok('a build that failed to compile can still be opened',
+     /data-fwact="menu" data-build="b2"/.test(body.innerHTML));
+  ok('but the menu is closed until it is asked for', !/fwmenu/.test(body.innerHTML));
+
+  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { menuFor: 'b1' } });
+  ok('an open menu offers Review and Delete',
+     /data-fwact="review" data-build="b1"/.test(body.innerHTML)
+     && /data-fwact="delete" data-build="b1"/.test(body.innerHTML));
+  ok('and Delete does not delete on the first press',
+     !/delete-confirm/.test(body.innerHTML));
+
+  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { menuFor: 'b1', confirmDelete: 'b1' } });
+  ok('the second press is the one that says what it does',
+     /data-fwact="delete-confirm" data-build="b1"/.test(body.innerHTML)
+     && /Delete for good/.test(body.innerHTML));
+
+  let menued = null, reviewed = null, deleted = null, confirmed = null, closed = 0;
+  mountFirmware(root, {
+    onFlash: () => {}, onMenu: id => { menued = id; }, onReview: id => { reviewed = id; },
+    onDelete: id => { deleted = id; }, onDeleteConfirm: id => { confirmed = id; },
+    onCloseReview: () => { closed++; },
+  });
+  const body2 = find(root, '[data-fw=body]');
+  renderFirmware({ firmware: [built], device: { link: 'linked' }, ui: { menuFor: 'b1' } });
+  const click2 = (fwact, build) => body2._listeners.click?.at(-1)?.({
+    target: { dataset: { fwact, build }, disabled: false, closest(sel) { return sel === '[data-fwact]' ? this : null; } },
+  });
+  click2('menu', 'b1'); click2('review', 'b1'); click2('delete', 'b1');
+  click2('delete-confirm', 'b1'); click2('close-review');
+  ok('each menu action reaches its own handler with the build id',
+     menued === 'b1' && reviewed === 'b1' && deleted === 'b1' && confirmed === 'b1' && closed === 1,
+     JSON.stringify({ menued, reviewed, deleted, confirmed, closed }));
+
+  /* ---- the source listing ---------------------------------------------- */
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { review: { buildId: 'b1', from: 'row', loading: true } },
+  });
+  ok('a review that is still fetching says so, and claims no code',
+     /reading the stored source/.test(body2.innerHTML));
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { review: { buildId: 'b1', from: 'row', files: { 'app.c': 'void app_setup(void) { /* <b>x</b> */ }' }, app: { name: 'oled_hello', version: '1.0.1' } } },
+  });
+  ok('the source is shown under the row it belongs to',
+     /app\.c/.test(body2.innerHTML) && /void app_setup/.test(body2.innerHTML));
+  ok('and the code is escaped, never interpreted as markup',
+     !/<b>x<\/b>/.test(body2.innerHTML) && /&lt;b&gt;/.test(body2.innerHTML));
+  ok('the listing names the build it came from', /build b1/.test(body2.innerHTML));
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { review: { buildId: 'b1', from: 'gate', files: { 'app.c': 'x' } } },
+  });
+  ok('a review opened from the gate is not also drawn in the table',
+     !/src__code/.test(body2.innerHTML));
+
+  renderFirmware({
+    firmware: [built], device: { link: 'linked' },
+    ui: { review: { buildId: 'b1', from: 'row', files: null, error: 'no stored source for build b1' } },
+  });
+  ok('a build with no stored source says so rather than showing nothing',
+     /no stored source/.test(body2.innerHTML));
+
+  /* ---- the table is not rebuilt when nothing about it changed ----------- */
+
+  /* This is what makes an open source listing scrollable. The panel repaints
+     on every heartbeat, and replacing the rows would send the code block back
+     to its first line each time — which is exactly what it did while the
+     comparison was made against innerHTML read back out of the DOM, where a
+     bare `disabled` returns as `disabled=""` and never matches what was
+     written. The stub below re-serialises the same way a browser does. */
+  const open = {
+    firmware: [built, other], device: { link: 'offline' },
+    ui: { review: { buildId: 'b1', from: 'row', files: { 'app.c': 'void app_setup(void) {}' } } },
+  };
+  renderFirmware(open);
+  let writes = 0;
+  const realBody = body2;
+  Object.defineProperty(realBody, 'innerHTML', {
+    configurable: true,
+    get() { return realBody._html.replace(/ disabled(?=[ >])/g, ' disabled=""'); },
+    set(v) { writes++; realBody._html = String(v); realBody.children = []; },
+  });
+
+  /* Ten heartbeats' worth of repaints with identical content. */
+  for (let i = 0; i < 10; i++) renderFirmware(open);
+  ok('repainting with nothing changed does not rebuild the rows', writes === 0, `${writes} rebuilds`);
+
+  renderFirmware({ ...open, device: { link: 'linked' } });
+  ok('but a real change still repaints', writes === 1, `${writes} rebuilds`);
+}
+
+/* ------------------------------------------------------------------------ */
+/* the approval gate offers the code it is about to write                    */
+/* ------------------------------------------------------------------------ */
+
+const { mountAgent, renderGate } = await load('render/agent.js');
+
+{
+  const root = tree(['agent', 'gate'], ['agent', 'status'], ['agent', 'order'],
+                    ['agent', 'attempts'], ['agent', 'empty'], ['agent', 'count']);
+  let reviewedGate = null, approved = 0, held = 0;
+  mountAgent(root, {
+    onApprove: () => { approved++; },
+    onHold: () => { held++; },
+    onReviewGate: g => { reviewedGate = g; },
+    onCloseReview: () => {},
+  });
+  const slot = find(root, '[data-agent=gate]');
+
+  const flashGate = {
+    state: 'pending', requestedBy: 'agent', buildId: 'b7',
+    action: 'Write build b7 to the inactive OTA slot',
+    rationale: 'An agent asked. Review source shows the exact code this image was compiled from.',
+    policy: 'waits for the operator',
+  };
+
+  renderGate({ gate: flashGate, ui: { review: null } });
+  ok('a flash gate offers the source beside Approve and Hold',
+     /data-gate="approve"/.test(slot.innerHTML)
+     && /data-gate="hold"/.test(slot.innerHTML)
+     && /data-gate="review"/.test(slot.innerHTML));
+  ok('and reviewing is offered as reading, not as a third answer',
+     /Review source/.test(slot.innerHTML));
+
+  /* A gate that writes no build — credentials, say — has nothing to read. */
+  renderGate({ gate: { ...flashGate, buildId: null }, ui: { review: null } });
+  ok('a gate with no build behind it offers no source to read',
+     !/data-gate="review"/.test(slot.innerHTML));
+
+  renderGate({ gate: flashGate, ui: { review: { buildId: 'b7', from: 'gate', files: { 'app.c': 'void app_setup(void) {}' } } } });
+  ok('the source opens inside the gate itself, above nothing else',
+     /void app_setup/.test(slot.innerHTML) && /src__code/.test(slot.innerHTML));
+  ok('and the button then offers to put it away', /Hide source/.test(slot.innerHTML));
+
+  /* A listing opened from an image row does not appear in the gate. */
+  renderGate({ gate: flashGate, ui: { review: { buildId: 'b7', from: 'row', files: { 'app.c': 'x' } } } });
+  ok('a listing opened from the images list is not duplicated into the gate',
+     !/src__code/.test(slot.innerHTML));
+
+  /* Drawing a gate, opening a listing and closing it again answers nothing:
+     the only things that resolve a gate are its two buttons. */
+  renderGate({ gate: flashGate, ui: { review: null } });
+  ok('drawing and reviewing never answers the gate on its own',
+     approved === 0 && held === 0 && reviewedGate === null);
+  ok('an answered gate stops offering the source at all',
+     (renderGate({ gate: { ...flashGate, state: 'held', answeredAt: Date.now() }, ui: { review: null } }),
+      !/data-gate="review"/.test(slot.innerHTML) && /HELD/.test(slot.innerHTML)));
 }
 
 console.log(`\n  ${pass} passed, ${fail} failed\n`);
